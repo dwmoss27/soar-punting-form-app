@@ -1,7 +1,10 @@
 import os
 import re
+import io
+import requests
 import streamlit as st
 import pandas as pd
+from bs4 import BeautifulSoup
 from datetime import date
 
 # Try to use rapidfuzz if available; fall back gracefully if not
@@ -21,39 +24,71 @@ from pf_client import (
     get_benchmarks_csv,
 )
 
-# --- PAGE CONFIG ---
+# ────────────────────────────────────────────────────────────────────────────────
+# PAGE CONFIG + LOGO
+# ────────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Soar Bloodstock Data - MoneyBall", layout="wide")
+
+# Logo priority: secrets URL → local assets/logo.png → uploaded in sidebar
+def _render_logo():
+    logo_url = None
+    try:
+        logo_url = st.secrets.get("LOGO_URL", None)
+    except Exception:
+        pass
+
+    if logo_url:
+        st.image(logo_url, use_column_width=False, width=220)
+        return
+
+    if os.path.exists("assets/logo.png"):
+        st.image("assets/logo.png", use_column_width=False, width=220)
+        return
+
+_render_logo()
 st.title("Soar Bloodstock Data - MoneyBall")
 
 LIVE = is_live()
 st.sidebar.success("✅ Live Mode (PF API)" if LIVE else "💤 Demo Mode (no API key)")
 
-# =========================================================
-# 🔐 Quick connection test (optional but handy)
-# =========================================================
 st.sidebar.markdown("---")
-if st.sidebar.button("🔐 Test PF connection"):
-    base_url = os.getenv("PF_BASE_URL", st.secrets.get("PF_BASE_URL", "(missing)"))
-    key_present = bool(os.getenv("PF_API_KEY", st.secrets.get("PF_API_KEY", "")))
-    st.write("PF_BASE_URL:", base_url)
-    st.write("PF_API_KEY present:", key_present)
-    st.info("If present is True but you still get 401, adjust PF_AUTH_HEADER / PF_AUTH_PREFIX in Secrets.")
+with st.sidebar.expander("🔧 Logo (optional)"):
+    st.caption("Preferred: place `assets/logo.png` in the repo or set `LOGO_URL` in Secrets.")
+    uploaded_logo = st.file_uploader("Temporary logo upload", type=["png", "jpg", "jpeg"], key="logo_up")
+    if uploaded_logo:
+        st.session_state["_temp_logo"] = uploaded_logo.read()
+        st.image(io.BytesIO(st.session_state["_temp_logo"]), width=180)
 
-# =========================================================
-# 1) INPUT — Paste or Upload
-# =========================================================
+# ────────────────────────────────────────────────────────────────────────────────
+# QUICK PF CONNECTION TEST
+# ────────────────────────────────────────────────────────────────────────────────
+with st.sidebar.expander("🔐 Test PF connection"):
+    if st.button("Run test", use_container_width=True):
+        base_url = os.getenv("PF_BASE_URL", st.secrets.get("PF_BASE_URL", "(missing)"))
+        key_present = bool(os.getenv("PF_API_KEY", st.secrets.get("PF_API_KEY", "")))
+        st.write("PF_BASE_URL:", base_url)
+        st.write("PF_API_KEY present:", key_present)
+        st.info("If present is True but you still get 401, set PF_AUTH_HEADER/PF_AUTH_PREFIX in Secrets.")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# INPUT — Paste / Upload / Fetch from Inglis URL
+# ────────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("🧾 Horse list input")
     pasted = st.text_area(
         "Paste horses (one per line):",
-        height=180,
+        height=160,
         placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\nLittle Spark",
     )
-    file = st.file_uploader("…or upload CSV/Excel (optional)", type=["csv", "xlsx"])
+    file = st.file_uploader("…or upload CSV/Excel", type=["csv", "xlsx"], key="sale_upload")
 
-# =========================================================
-# 2) LOAD DATA (robust)
-# =========================================================
+    st.markdown("**Or fetch directly from an Inglis sale page**")
+    inglis_url = st.text_input("Inglis Page URL (optional)")
+    fetch_btn = st.button("🌐 Fetch from page", use_container_width=True, key="fetch_inglis")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# HELPERS: column cleaning, name detection, page scraping
+# ────────────────────────────────────────────────────────────────────────────────
 def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
     clean = {}
     for c in df.columns:
@@ -63,17 +98,76 @@ def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=clean)
 
 def detect_name_col(cols) -> str | None:
-    norm = {re.sub(r"\s+", "", c).lower(): c for c in cols}
+    norm = {re.sub(r"\s+", "", str(c)).lower(): c for c in cols}
     for cand in ["name", "horse", "horse name", "horsename", "lot name"]:
         key = re.sub(r"\s+", "", cand).lower()
         if key in norm:
             return norm[key]
     for c in cols:  # fallback: anything containing "name"
-        if "name" in c.lower():
+        if "name" in str(c).lower():
             return c
     return None
 
+def _looks_like_sale_table(df: pd.DataFrame) -> bool:
+    cols = [str(c).lower() for c in df.columns]
+    must_have_any = ["name", "horse"]
+    # Needs at least a name-like column and 6+ columns typical of sale lists
+    return any(any(m in c for m in must_have_any) for c in cols) and len(cols) >= 6
+
+def fetch_inglis_table(url: str) -> pd.DataFrame | None:
+    """
+    Tries a few strategies:
+    1) pandas.read_html (fast if table is server-rendered)
+    2) requests + BeautifulSoup → best-match table by heuristics
+    NOTE: If the site renders via JS only, users should paste/export CSV instead.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+
+    # 1) Try read_html directly
+    try:
+        tables = pd.read_html(url, flavor="lxml")
+        candidates = [clean_headers(t) for t in tables if _looks_like_sale_table(clean_headers(t))]
+        if candidates:
+            # If multiple, pick the one with the most rows
+            return max(candidates, key=lambda d: len(d))
+    except Exception:
+        pass
+
+    # 2) requests + bs4 then read_html on the HTML
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        if resp.status_code != 200:
+            return None
+        html = resp.text
+        # Quick path: read all tables from HTML string
+        try:
+            tables = pd.read_html(html)
+            candidates = [clean_headers(t) for t in tables if _looks_like_sale_table(clean_headers(t))]
+            if candidates:
+                return max(candidates, key=lambda d: len(d))
+        except Exception:
+            pass
+
+        # Fallback: try to manually parse rows (very basic heuristic)
+        soup = BeautifulSoup(html, "lxml")
+        table = soup.find("table")
+        if table:
+            df = pd.read_html(str(table))[0]
+            df = clean_headers(df)
+            if _looks_like_sale_table(df):
+                return df
+    except Exception:
+        pass
+
+    return None
+
+# ────────────────────────────────────────────────────────────────────────────────
+# BUILD sale_df: File → Inglis URL → Pasted list
+# ────────────────────────────────────────────────────────────────────────────────
 sale_df = None
+file_error = None
 
 if file is not None:
     try:
@@ -87,19 +181,36 @@ if file is not None:
                 tmp = pd.read_csv(file, sep=None, engine="python", encoding="ISO-8859-1", on_bad_lines="skip")
         sale_df = clean_headers(tmp)
     except Exception as e:
-        st.error(f"❌ Could not read uploaded file: {e}")
+        file_error = f"❌ Could not read uploaded file: {e}"
 
-# Fallback to pasted names if no file or read failed
+url_df = None
+if fetch_btn and inglis_url:
+    with st.spinner("Fetching Inglis page…"):
+        url_df = fetch_inglis_table(inglis_url)
+        if url_df is None:
+            st.warning("Couldn’t parse that page. If it’s a Javascript-only table, use the page’s CSV export or copy/paste.")
+        else:
+            st.success(f"Fetched {len(url_df)} rows from Inglis page.")
+            if sale_df is None:
+                sale_df = url_df.copy()
+            else:
+                # Merge by union rows (simple concat-dedup on all columns)
+                sale_df = pd.concat([sale_df, url_df], ignore_index=True).drop_duplicates()
+
+# If both file and URL failed, fallback to pasted names
 if sale_df is None:
     names = [n.strip() for n in pasted.splitlines() if n.strip()]
     sale_df = pd.DataFrame({"Name": names})
 
-# =========================================================
-# 3) SIDEBAR FILTERS + HORSE SELECT
-# =========================================================
+if file_error:
+    st.error(file_error)
+
+# ────────────────────────────────────────────────────────────────────────────────
+# SIDEBAR FILTERS + HORSE SELECT
+# ────────────────────────────────────────────────────────────────────────────────
 name_col = detect_name_col(list(sale_df.columns))
 if not name_col:
-    st.error("No 'Name' column found and no pasted names. Paste names (one per line) or upload a file.")
+    st.error("No 'Name' column found and no pasted names. Paste names (one per line), upload a file, or fetch a page.")
     st.stop()
 
 with st.sidebar:
@@ -134,19 +245,21 @@ if not row.empty:
         ("Dam", "Dam"),
         ("Vendor", "Vendor"),
         ("Bid", "Bid"),
+        ("State", "State"),
+        ("Purchaser", "Purchaser"),
     ]:
         show(label, key)
 
-# =========================================================
-# 4) CONNECT TO PUNTING FORM (button triggers)
-# =========================================================
+# ────────────────────────────────────────────────────────────────────────────────
+# CONNECT TO PUNTING FORM (button triggers)
+# ────────────────────────────────────────────────────────────────────────────────
 if st.button("🔍 View Punting Form Data"):
     with st.spinner(f"Fetching Punting Form data for {horse_name}..."):
         try:
             ident = search_horse_by_name(horse_name)
             st.success(f"Found: {ident.get('display_name', horse_name)}")
 
-            # NOTE: Depending on PF's API, you may need meeting_id/race_id instead of horse_id
+            # NOTE: Depending on PF’s API you may need meeting_id/race_id instead of horse_id.
             horse_id = ident.get("horse_id")
 
             form_data = get_form(horse_id)
@@ -163,15 +276,15 @@ if st.button("🔍 View Punting Form Data"):
         except Exception as e:
             st.error(f"Could not retrieve data: {e}")
 
-# =========================================================
-# 5) DEMO DATA + FILTERING (only used in Demo Mode)
-# =========================================================
+# ────────────────────────────────────────────────────────────────────────────────
+# DEMO SHORTLIST (only meaningful in Demo Mode)
+# ────────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("Optional: shortlist builder (Demo Mode)")
+st.subheader("Shortlist Builder (Demo Mode)")
 
 names_text = st.text_area(
-    "Horse list (optional, for demo mode):",
-    height=220,
+    "Horse list (optional, for demo):",
+    height=180,
     placeholder="Eleanor Nancy\nFast Intentions\nSir Goldalot\nLittle Spark",
 )
 names = [n.strip() for n in names_text.splitlines() if n.strip()]
@@ -179,7 +292,7 @@ unique_names = sorted(set(names)) if names else []
 
 @st.cache_data
 def load_demo_db():
-    # Make demo optional so the app doesn't crash if file is missing
+    # Optional demo DB
     try:
         df = pd.read_csv("data/puntingform_demo.csv")
         df["name_std"] = (
@@ -209,7 +322,7 @@ def demo_fuzzy_lookup(name: str):
         row = DEMO[DEMO["name_std"] == best[0]].iloc[0].to_dict()
         return row, int(best[1])
     else:
-        # Simple fallback: exact/startswith matching
+        # Simple fallback
         m = DEMO[DEMO["name_std"].str.startswith(target)]
         if m.empty:
             m = DEMO[DEMO["name_std"] == target]
@@ -324,7 +437,7 @@ with right:
         st.caption("Paste some demo names on the left and apply filters to view details here.")
     else:
         if LIVE:
-            st.warning("Live mode needs meeting/race mapping to fetch full data via PF endpoints.")
+            st.warning("Live mode may require meeting/race mapping to fetch full data via PF endpoints.")
             st.code(
                 "# Example usage once you have IDs\n"
                 "form = get_form(meeting_id='MEETING_ID')\n"
