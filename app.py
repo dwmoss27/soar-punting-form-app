@@ -1,35 +1,101 @@
-
 import os, json
 import streamlit as st
 import pandas as pd
-
-SALE_DATA_PATH = "inglis_sale_clean.csv"
-
-# Try multiple encodings and tolerate odd lines
-try:
-    sale_df = pd.read_csv(
-        SALE_DATA_PATH,
-        encoding="utf-8",
-        on_bad_lines="skip"  # skip malformed rows
-    )
-except Exception:
-    sale_df = pd.read_csv(
-        SALE_DATA_PATH,
-        encoding="ISO-8859-1",
-        on_bad_lines="skip"
-    )
-
-
-
+import re
 from datetime import date
 from rapidfuzz import process, fuzz
 
-from pf_client import is_live, search_horse_by_name, get_form, get_ratings, get_speedmap, get_sectionals_csv, get_benchmarks_csv
+from pf_client import (
+    is_live, search_horse_by_name, get_form,
+    get_ratings, get_speedmap, get_sectionals_csv, get_benchmarks_csv
+)
 
+# === CONFIGURATION ===
 st.set_page_config(page_title="Soar — PF Click-to-Load (Live-ready)", layout="wide")
 st.title("Soar — Punting Form Click-to-Load")
 
+# === LOAD AND CLEAN INGLIS SALE DATA ===
+SALE_DATA_PATH = "inglis_sale_clean.csv"   # change to "data/inglis_sale_clean.csv" if in folder
+
+def read_sale_csv(path):
+    """Try multiple encodings and tolerate messy lines/delimiters."""
+    try:
+        df = pd.read_csv(path, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
+    except UnicodeDecodeError:
+        df = pd.read_csv(path, sep=None, engine="python", encoding="ISO-8859-1", on_bad_lines="skip")
+    return df
+
+try:
+    sale_df = read_sale_csv(SALE_DATA_PATH)
+except FileNotFoundError:
+    st.error(f"❌ Could not find file: {SALE_DATA_PATH}")
+    st.stop()
+
+# --- Clean and normalize column names ---
+clean_map = {}
+for col in sale_df.columns:
+    c = str(col).replace("\ufeff", "")             # remove BOM
+    c = re.sub(r"\s+", " ", c).strip()             # collapse whitespace
+    clean_map[col] = c
+sale_df.rename(columns=clean_map, inplace=True)
+
+# normalized lookup (for flexible matching)
+norm_to_orig = {re.sub(r"\s+", "", c).lower(): c for c in sale_df.columns}
+
+# --- Find the "Name"/"Horse" column automatically ---
+def find_name_column(columns_dict):
+    candidates = ["name", "horse", "horse name", "lot name", "horsename"]
+    for cand in candidates:
+        key = re.sub(r"\s+", "", cand).lower()
+        if key in columns_dict:
+            return columns_dict[key]
+    # fallback: any column containing 'name'
+    for k, v in columns_dict.items():
+        if "name" in k:
+            return v
+    return None
+
+name_col = find_name_column(norm_to_orig)
+
+if not name_col:
+    st.error("Couldn't find a 'Name' or 'Horse' column in the uploaded CSV.")
+    st.write("Detected columns:", list(sale_df.columns))
+    st.stop()
+
+# --- Connection mode indicator ---
 LIVE = is_live()
+st.sidebar.success("Live Mode (PF API)" if LIVE else "Demo Mode (no API key)")
+
+# === SIDEBAR FILTERS ===
+with st.sidebar:
+    st.header("Filters")
+    age = st.number_input("Age (years)", min_value=2, max_value=12, value=3)
+    sex = st.selectbox("Sex", ["Any", "Gelding", "Mare", "Horse", "Colt", "Filly"])
+    maiden = st.selectbox("Maiden", ["Any", "Yes", "No"])
+    bm_cut = st.number_input("Max All Avg Benchmark", value=5.0, step=0.1)
+    st.header("🧾 Inglis Sale Horses")
+
+    # dynamic dropdown from detected column
+    horse_name = st.selectbox(
+        "Select a horse",
+        sorted(sale_df[name_col].dropna().astype(str).unique())
+    )
+
+st.write(f"### Selected Horse: {horse_name}")
+
+# Retrieve the matching sale row safely
+try:
+    horse_row = sale_df[sale_df[name_col] == horse_name].iloc[0]
+    st.write("**Lot:**", horse_row.get("Lot", "—"))
+    st.write("**Age:**", horse_row.get("Age", "—"))
+    st.write("**Sex:**", horse_row.get("Sex", "—"))
+    st.write("**Sire:**", horse_row.get("Sire", "—"))
+    st.write("**Dam:**", horse_row.get("Dam", "—"))
+    st.write("**Vendor:**", horse_row.get("Vendor", "—"))
+    st.write("**Current Bid:**", horse_row.get("Bid", "—"))
+except Exception:
+    st.warning("Couldn’t display sale details for the selected horse.")
+
 st.sidebar.success("Live Mode (PF API)" if LIVE else "Demo Mode (no API key)")
 
 with st.sidebar:
