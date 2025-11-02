@@ -1,79 +1,115 @@
-import os, json
+# --- BEGIN SIMPLE LOADER (replace your lines 1–80 with this) ---
 import streamlit as st
 import pandas as pd
 import re
 from datetime import date
-from rapidfuzz import process, fuzz
 
 from pf_client import (
     is_live, search_horse_by_name, get_form,
     get_ratings, get_speedmap, get_sectionals_csv, get_benchmarks_csv
 )
 
-# === CONFIGURATION ===
 st.set_page_config(page_title="Soar — PF Click-to-Load (Live-ready)", layout="wide")
 st.title("Soar — Punting Form Click-to-Load")
 
-# === LOAD AND CLEAN INGLIS SALE DATA ===
-SALE_DATA_PATH = "inglis_sale_clean.csv"   # change to "data/inglis_sale_clean.csv" if in folder
-
-def read_sale_csv(path):
-    """Try multiple encodings and tolerate messy lines/delimiters."""
-    try:
-        df = pd.read_csv(path, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
-    except UnicodeDecodeError:
-        df = pd.read_csv(path, sep=None, engine="python", encoding="ISO-8859-1", on_bad_lines="skip")
-    return df
-
-try:
-    sale_df = read_sale_csv(SALE_DATA_PATH)
-except FileNotFoundError:
-    st.error(f"❌ Could not find file: {SALE_DATA_PATH}")
-    st.stop()
-
-# --- Clean and normalize column names ---
-clean_map = {}
-for col in sale_df.columns:
-    c = str(col).replace("\ufeff", "")             # remove BOM
-    c = re.sub(r"\s+", " ", c).strip()             # collapse whitespace
-    clean_map[col] = c
-sale_df.rename(columns=clean_map, inplace=True)
-
-# normalized lookup (for flexible matching)
-norm_to_orig = {re.sub(r"\s+", "", c).lower(): c for c in sale_df.columns}
-
-# --- Find the "Name"/"Horse" column automatically ---
-def find_name_column(columns_dict):
-    candidates = ["name", "horse", "horse name", "lot name", "horsename"]
-    for cand in candidates:
-        key = re.sub(r"\s+", "", cand).lower()
-        if key in columns_dict:
-            return columns_dict[key]
-    # fallback: any column containing 'name'
-    for k, v in columns_dict.items():
-        if "name" in k:
-            return v
-    return None
-
-name_col = find_name_column(norm_to_orig)
-
-if not name_col:
-    st.error("Couldn't find a 'Name' or 'Horse' column in the uploaded CSV.")
-    st.write("Detected columns:", list(sale_df.columns))
-    st.stop()
-
-# --- Connection mode indicator ---
 LIVE = is_live()
 st.sidebar.success("Live Mode (PF API)" if LIVE else "Demo Mode (no API key)")
 
-# === SIDEBAR FILTERS ===
+# -----------------------------
+# 1) INPUT: paste OR upload
+# -----------------------------
+with st.sidebar:
+    st.header("🧾 Horse list input (pick one)")
+    pasted = st.text_area(
+        "Paste horses (one per line). This is the quickest path.",
+        height=180,
+        placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\n..."
+    )
+    file = st.file_uploader("…or upload CSV or Excel (optional)", type=["csv", "xlsx"])
+
+# -----------------------------
+# 2) Build sale_df
+# -----------------------------
+def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
+    clean = {}
+    for c in df.columns:
+        x = str(c).replace("\ufeff", "")
+        x = re.sub(r"\s+", " ", x).strip()
+        clean[c] = x
+    return df.rename(columns=clean)
+
+def detect_name_col(cols) -> str | None:
+    norm = {re.sub(r"\s+", "", c).lower(): c for c in cols}
+    for cand in ["name", "horse", "horse name", "horsename", "lot name"]:
+        key = re.sub(r"\s+", "", cand).lower()
+        if key in norm:
+            return norm[key]
+    # fallback: anything containing "name"
+    for c in cols:
+        if "name" in c.lower():
+            return c
+    return None
+
+sale_df = None
+
+if file is not None:
+    try:
+        if file.name.lower().endswith(".xlsx"):
+            tmp = pd.read_excel(file)
+        else:
+            # tolerate messy CSVs
+            try:
+                tmp = pd.read_csv(file, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
+            except UnicodeDecodeError:
+                tmp = pd.read_csv(file, sep=None, engine="python", encoding="ISO-8859-1", on_bad_lines="skip")
+        sale_df = clean_headers(tmp)
+    except Exception as e:
+        st.error(f"Could not read uploaded file: {e}")
+
+# If no file or file failed, fall back to pasted list
+if sale_df is None:
+    names = [n.strip() for n in pasted.splitlines() if n.strip()]
+    sale_df = pd.DataFrame({"Name": names})
+
+# -----------------------------
+# 3) Dropdown from detected name column
+# -----------------------------
+name_col = detect_name_col(list(sale_df.columns))
+if not name_col:
+    st.error("No 'Name' column found and no pasted names. Paste names (one per line) or upload a file.")
+    st.stop()
+
 with st.sidebar:
     st.header("Filters")
     age = st.number_input("Age (years)", min_value=2, max_value=12, value=3)
     sex = st.selectbox("Sex", ["Any", "Gelding", "Mare", "Horse", "Colt", "Filly"])
     maiden = st.selectbox("Maiden", ["Any", "Yes", "No"])
     bm_cut = st.number_input("Max All Avg Benchmark", value=5.0, step=0.1)
-    st.header("🧾 Inglis Sale Horses")
+
+    st.header("Select a horse")
+    horse_name = st.selectbox(
+        "Horse",
+        sorted(sale_df[name_col].dropna().astype(str).unique())
+    )
+
+st.write(f"### Selected Horse: {horse_name}")
+
+# show auction fields if present
+row = sale_df[sale_df[name_col].astype(str) == str(horse_name)]
+if not row.empty:
+    r = row.iloc[0].to_dict()
+    def show(label, key):
+        if key in r and pd.notnull(r[key]) and str(r[key]).strip():
+            st.write(f"**{label}:**", r[key])
+
+    show("Lot", "Lot")
+    show("Age", "Age")
+    show("Sex", "Sex")
+    show("Sire", "Sire")
+    show("Dam", "Dam")
+    show("Vendor", "Vendor")
+    show("Bid", "Bid")
+# --- END SIMPLE LOADER ---
 
     # dynamic dropdown from detected column
     horse_name = st.selectbox(
