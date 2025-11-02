@@ -1,6 +1,7 @@
+import os
+import re
 import streamlit as st
 import pandas as pd
-import re
 from datetime import date
 
 # Try to use rapidfuzz if available; fall back gracefully if not
@@ -21,11 +22,22 @@ from pf_client import (
 )
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Soar — PF Click-to-Load", layout="wide")
-st.title("Soar — Punting Form Click-to-Load")
+st.set_page_config(page_title="Soar Bloodstock Data - MoneyBall", layout="wide")
+st.title("Soar Bloodstock Data - MoneyBall")
 
 LIVE = is_live()
 st.sidebar.success("✅ Live Mode (PF API)" if LIVE else "💤 Demo Mode (no API key)")
+
+# =========================================================
+# 🔐 Quick connection test (optional but handy)
+# =========================================================
+st.sidebar.markdown("---")
+if st.sidebar.button("🔐 Test PF connection"):
+    base_url = os.getenv("PF_BASE_URL", st.secrets.get("PF_BASE_URL", "(missing)"))
+    key_present = bool(os.getenv("PF_API_KEY", st.secrets.get("PF_API_KEY", "")))
+    st.write("PF_BASE_URL:", base_url)
+    st.write("PF_API_KEY present:", key_present)
+    st.info("If present is True but you still get 401, adjust PF_AUTH_HEADER / PF_AUTH_PREFIX in Secrets.")
 
 # =========================================================
 # 1) INPUT — Paste or Upload
