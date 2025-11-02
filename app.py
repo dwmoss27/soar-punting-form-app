@@ -2,6 +2,10 @@
 import os, json
 import streamlit as st
 import pandas as pd
+# Load Inglis sale data
+SALE_DATA_PATH = "data/inglis_sale.csv"  # or "inglis_sale.csv" if not in folder
+sale_df = pd.read_csv(SALE_DATA_PATH)
+
 from datetime import date
 from rapidfuzz import process, fuzz
 
@@ -19,8 +23,57 @@ with st.sidebar:
     sex = st.selectbox("Sex", ["Any", "Gelding", "Mare", "Horse", "Colt", "Filly"])
     maiden = st.selectbox("Maiden", ["Any", "Yes", "No"])
     bm_cut = st.number_input("Max All Avg Benchmark", value=5.0, step=0.1)
+st.sidebar.header("🧾 Inglis Sale Horses")
+
+horse_name = st.sidebar.selectbox(
+    "Select a horse",
+    sorted(sale_df["Name"].dropna().unique())
+)
+
+st.write(f"### Selected Horse: {horse_name}")
+horse_row = sale_df[sale_df["Name"] == horse_name].iloc[0]
+
+st.write("**Lot:**", horse_row["Lot"])
+st.write("**Age:**", horse_row["Age"])
+st.write("**Sex:**", horse_row["Sex"])
+st.write("**Sire:**", horse_row["Sire"])
+st.write("**Dam:**", horse_row["Dam"])
+st.write("**Vendor:**", horse_row["Vendor"])
+st.write("**Current Bid:**", horse_row["Bid"])
 
 st.write("Paste **one horse per line** (copied from Inglis list):")
+horse_name = st.sidebar.selectbox(
+    "Select a horse",
+    sorted(sale_df["Name"].dropna().unique())
+)
+
+st.write(f"### Selected Horse: {horse_name}")
+# 🔍 Connect to Punting Form API
+from pf_client import search_horse_by_name, get_form, get_ratings, get_speedmap
+
+if st.button("🔍 View Punting Form Data"):
+    with st.spinner(f"Fetching Punting Form data for {horse_name}..."):
+        try:
+            # Step 1: Search the horse on Punting Form
+            result = search_horse_by_name(horse_name)
+            st.success(f"Found: {result.get('display_name', horse_name)}")
+
+            # Step 2: Retrieve detailed form and ratings (if available)
+            form_data = get_form(result.get("horse_id"))
+            ratings = get_ratings(result.get("horse_id"))
+            speedmap = get_speedmap(result.get("horse_id"))
+
+            # Step 3: Display in expandable sections
+            with st.expander("📄 Form Summary"):
+                st.json(form_data)
+            with st.expander("📊 Ratings"):
+                st.json(ratings)
+            with st.expander("🏃 Speedmap"):
+                st.json(speedmap)
+
+        except Exception as e:
+            st.error(f"Could not retrieve data: {e}")
+
 names_text = st.text_area("Horse list", height=220, placeholder="Eleanor Nancy\nFast Intentions\nSir Goldalot\nLittle Spark")
 
 names = [n.strip() for n in names_text.splitlines() if n.strip()]
