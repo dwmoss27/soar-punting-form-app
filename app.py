@@ -4,8 +4,13 @@ import streamlit as st
 import pandas as pd
 # Load Inglis sale data
 SALE_DATA_PATH = "inglis_sale.csv"
-  # or "inglis_sale.csv" if not in folder
-sale_df = pd.read_csv(SALE_DATA_PATH)
+
+# Try UTF-8 first, fallback to ISO-8859-1 if needed
+try:
+    sale_df = pd.read_csv(SALE_DATA_PATH, encoding="utf-8")
+except UnicodeDecodeError:
+    sale_df = pd.read_csv(SALE_DATA_PATH, encoding="ISO-8859-1")
+
 
 from datetime import date
 from rapidfuzz import process, fuzz
