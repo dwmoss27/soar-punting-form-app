@@ -1,0 +1,21 @@
+{
+  "search": {
+    "path": "/form/fields/csv",
+    "notes": "Adjust to a true horse search endpoint if available; this is a placeholder."
+  },
+  "form": {
+    "path": "/form/form"
+  },
+  "ratings": {
+    "path": "/Ratings/MeetingRatings"
+  },
+  "speedmaps": {
+    "path": "/User/Speedmaps"
+  },
+  "sectionals_csv": {
+    "path": "/Ratings/MeetingSectionals/csv"
+  },
+  "benchmarks_csv": {
+    "path": "/Ratings/MeetingBenchmarks/csv"
+  }
+}

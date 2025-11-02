@@ -1,0 +1,6 @@
+horse_name,yob,sex,maiden,avg_benchmark_all,last3_L600,last3_L400,last3_L200,starts,wins,trainer,sp_trend
+Little Spark,2020,Mare,False,61.5,34.2,22.8,11.5,8,2,Trainer A,down
+Sir Goldalot,2019,Gelding,False,64.0,34.8,23.1,11.6,22,4,Trainer B,flat
+Eleanor Nancy,2021,Mare,True,4.2,33.9,22.7,11.3,7,0,Trainer C,up
+Fast Intentions,2022,Gelding,True,3.7,34.1,22.9,11.4,5,0,Trainer D,flat
+Hidden Ace,2022,Gelding,True,6.0,36.5,23.8,11.9,3,0,Trainer E,down
