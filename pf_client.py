@@ -1,15 +1,31 @@
+# pf_client.py
+# Minimal live-ready PF client:
+# - Works in Demo mode if no PF_API_KEY is set
+# - Reads endpoint config if present; falls back to defaults if not
 
-import os, io, json, requests, pandas as pd
-from dotenv import load_dotenv
-
-load_dotenv()
+import os, io, json
+import requests
+import pandas as pd
 
 PF_API_KEY = os.getenv("PF_API_KEY", "").strip()
 PF_BASE_URL = os.getenv("PF_BASE_URL", "https://api.puntingform.com.au/v2").rstrip("/")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
 
-with open("config/pf_endpoints.json", "r") as f:
-    ENDPOINTS = json.load(f)
+# Load endpoint config if available
+_DEFAULT_ENDPOINTS = {
+    "search": {"path": "/form/fields/csv"},
+    "form": {"path": "/form/form"},
+    "ratings": {"path": "/Ratings/MeetingRatings"},
+    "speedmaps": {"path": "/User/Speedmaps"},
+    "sectionals_csv": {"path": "/Ratings/MeetingSectionals/csv"},
+    "benchmarks_csv": {"path": "/Ratings/MeetingBenchmarks/csv"},
+}
+ENDPOINTS = _DEFAULT_ENDPOINTS
+try:
+    with open("config/pf_endpoints.json", "r") as f:
+        ENDPOINTS = json.load(f)
+except Exception:
+    ENDPOINTS = _DEFAULT_ENDPOINTS
 
 HEAD = {"Authorization": f"Bearer {PF_API_KEY}"} if PF_API_KEY else {}
 
@@ -34,10 +50,10 @@ def _get_text(url: str, params: dict=None):
     r.raise_for_status()
     return r.text
 
+# ---- Public functions used by app.py ----
+
 def search_horse_by_name(name: str, yob: int=None, sire: str=None) -> dict:
-    # Placeholder: point to a real horse lookup if available in your PF plan.
-    # Return a dict with enough identity to fetch deeper data later.
-    # You can also return meetingId/raceId if you resolve via Fields/Form first.
+    """Placeholder search; return minimal identity so app runs in Demo mode."""
     return {"found": True, "display_name": name, "horse_id": None, "yob": yob, "sire": sire}
 
 def get_form(meeting_id: str=None, race_id: str=None) -> dict:
