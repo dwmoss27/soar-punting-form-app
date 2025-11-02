@@ -2,14 +2,23 @@
 import os, json
 import streamlit as st
 import pandas as pd
-# Load Inglis sale data
-SALE_DATA_PATH = "inglis_sale.csv"
 
-# Try UTF-8 first, fallback to ISO-8859-1 if needed
+SALE_DATA_PATH = "inglis_sale_clean.csv"
+
+# Try multiple encodings and tolerate odd lines
 try:
-    sale_df = pd.read_csv(SALE_DATA_PATH, encoding="utf-8")
-except UnicodeDecodeError:
-    sale_df = pd.read_csv(SALE_DATA_PATH, encoding="ISO-8859-1")
+    sale_df = pd.read_csv(
+        SALE_DATA_PATH,
+        encoding="utf-8",
+        on_bad_lines="skip"  # skip malformed rows
+    )
+except Exception:
+    sale_df = pd.read_csv(
+        SALE_DATA_PATH,
+        encoding="ISO-8859-1",
+        on_bad_lines="skip"
+    )
+
 
 
 from datetime import date
