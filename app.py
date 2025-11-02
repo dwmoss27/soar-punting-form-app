@@ -3,7 +3,8 @@ import os, json
 import streamlit as st
 import pandas as pd
 # Load Inglis sale data
-SALE_DATA_PATH = "data/inglis_sale.csv"  # or "inglis_sale.csv" if not in folder
+SALE_DATA_PATH = "inglis_sale.csv"
+  # or "inglis_sale.csv" if not in folder
 sale_df = pd.read_csv(SALE_DATA_PATH)
 
 from datetime import date
