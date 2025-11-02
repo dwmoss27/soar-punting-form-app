@@ -1,40 +1,41 @@
-# --- BEGIN SIMPLE LOADER (replace your lines 1–80 with this) ---
 import streamlit as st
 import pandas as pd
 import re
 from datetime import date
+from fuzzywuzzy import fuzz, process
 
 from pf_client import (
     is_live, search_horse_by_name, get_form,
     get_ratings, get_speedmap, get_sectionals_csv, get_benchmarks_csv
 )
 
-st.set_page_config(page_title="Soar — PF Click-to-Load (Live-ready)", layout="wide")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Soar — PF Click-to-Load", layout="wide")
 st.title("Soar — Punting Form Click-to-Load")
 
 LIVE = is_live()
-st.sidebar.success("Live Mode (PF API)" if LIVE else "Demo Mode (no API key)")
+st.sidebar.success("✅ Live Mode (PF API)" if LIVE else "💤 Demo Mode (no API key)")
 
-# -----------------------------
-# 1) INPUT: paste OR upload
-# -----------------------------
+# =========================================================
+# 1️⃣ INPUT — Paste or Upload
+# =========================================================
 with st.sidebar:
-    st.header("🧾 Horse list input (pick one)")
+    st.header("🧾 Horse list input")
     pasted = st.text_area(
-        "Paste horses (one per line). This is the quickest path.",
+        "Paste horses (one per line):",
         height=180,
-        placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\n..."
+        placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\nLittle Spark"
     )
-    file = st.file_uploader("…or upload CSV or Excel (optional)", type=["csv", "xlsx"])
+    file = st.file_uploader("…or upload CSV/Excel (optional)", type=["csv", "xlsx"])
 
-# -----------------------------
-# 2) Build sale_df
-# -----------------------------
+# =========================================================
+# 2️⃣ LOAD DATA
+# =========================================================
 def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
     clean = {}
     for c in df.columns:
-        x = str(c).replace("\ufeff", "")
-        x = re.sub(r"\s+", " ", x).strip()
+        x = str(c).replace("\ufeff", "").strip()
+        x = re.sub(r"\s+", " ", x)
         clean[c] = x
     return df.rename(columns=clean)
 
@@ -44,7 +45,6 @@ def detect_name_col(cols) -> str | None:
         key = re.sub(r"\s+", "", cand).lower()
         if key in norm:
             return norm[key]
-    # fallback: anything containing "name"
     for c in cols:
         if "name" in c.lower():
             return c
@@ -57,36 +57,35 @@ if file is not None:
         if file.name.lower().endswith(".xlsx"):
             tmp = pd.read_excel(file)
         else:
-            # tolerate messy CSVs
             try:
                 tmp = pd.read_csv(file, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
             except UnicodeDecodeError:
                 tmp = pd.read_csv(file, sep=None, engine="python", encoding="ISO-8859-1", on_bad_lines="skip")
         sale_df = clean_headers(tmp)
     except Exception as e:
-        st.error(f"Could not read uploaded file: {e}")
+        st.error(f"❌ Could not read uploaded file: {e}")
 
-# If no file or file failed, fall back to pasted list
+# fallback to pasted names
 if sale_df is None:
     names = [n.strip() for n in pasted.splitlines() if n.strip()]
     sale_df = pd.DataFrame({"Name": names})
 
-# -----------------------------
-# 3) Dropdown from detected name column
-# -----------------------------
+# =========================================================
+# 3️⃣ SIDEBAR FILTERS + HORSE SELECT
+# =========================================================
 name_col = detect_name_col(list(sale_df.columns))
 if not name_col:
     st.error("No 'Name' column found and no pasted names. Paste names (one per line) or upload a file.")
     st.stop()
 
 with st.sidebar:
-    st.header("Filters")
+    st.header("🔍 Filters")
     age = st.number_input("Age (years)", min_value=2, max_value=12, value=3)
     sex = st.selectbox("Sex", ["Any", "Gelding", "Mare", "Horse", "Colt", "Filly"])
     maiden = st.selectbox("Maiden", ["Any", "Yes", "No"])
     bm_cut = st.number_input("Max All Avg Benchmark", value=5.0, step=0.1)
 
-    st.header("Select a horse")
+    st.header("🐎 Select a horse")
     horse_name = st.selectbox(
         "Horse",
         sorted(sale_df[name_col].dropna().astype(str).unique())
@@ -94,93 +93,31 @@ with st.sidebar:
 
 st.write(f"### Selected Horse: {horse_name}")
 
-# show auction fields if present
 row = sale_df[sale_df[name_col].astype(str) == str(horse_name)]
 if not row.empty:
     r = row.iloc[0].to_dict()
     def show(label, key):
         if key in r and pd.notnull(r[key]) and str(r[key]).strip():
             st.write(f"**{label}:**", r[key])
+    for label, key in [
+        ("Lot", "Lot"), ("Age", "Age"), ("Sex", "Sex"),
+        ("Sire", "Sire"), ("Dam", "Dam"), ("Vendor", "Vendor"), ("Bid", "Bid")
+    ]:
+        show(label, key)
 
-    show("Lot", "Lot")
-    show("Age", "Age")
-    show("Sex", "Sex")
-    show("Sire", "Sire")
-    show("Dam", "Dam")
-    show("Vendor", "Vendor")
-    show("Bid", "Bid")
-# --- END SIMPLE LOADER ---
-
-    # dynamic dropdown from detected column
-    horse_name = st.selectbox(
-        "Select a horse",
-        sorted(sale_df[name_col].dropna().astype(str).unique())
-    )
-
-st.write(f"### Selected Horse: {horse_name}")
-
-# Retrieve the matching sale row safely
-try:
-    horse_row = sale_df[sale_df[name_col] == horse_name].iloc[0]
-    st.write("**Lot:**", horse_row.get("Lot", "—"))
-    st.write("**Age:**", horse_row.get("Age", "—"))
-    st.write("**Sex:**", horse_row.get("Sex", "—"))
-    st.write("**Sire:**", horse_row.get("Sire", "—"))
-    st.write("**Dam:**", horse_row.get("Dam", "—"))
-    st.write("**Vendor:**", horse_row.get("Vendor", "—"))
-    st.write("**Current Bid:**", horse_row.get("Bid", "—"))
-except Exception:
-    st.warning("Couldn’t display sale details for the selected horse.")
-
-st.sidebar.success("Live Mode (PF API)" if LIVE else "Demo Mode (no API key)")
-
-with st.sidebar:
-    st.header("Filters")
-    age = st.number_input("Age (years)", min_value=2, max_value=12, value=3)
-    sex = st.selectbox("Sex", ["Any", "Gelding", "Mare", "Horse", "Colt", "Filly"])
-    maiden = st.selectbox("Maiden", ["Any", "Yes", "No"])
-    bm_cut = st.number_input("Max All Avg Benchmark", value=5.0, step=0.1)
-st.sidebar.header("🧾 Inglis Sale Horses")
-
-horse_name = st.sidebar.selectbox(
-    "Select a horse",
-    sorted(sale_df["Name"].dropna().unique())
-)
-
-st.write(f"### Selected Horse: {horse_name}")
-horse_row = sale_df[sale_df["Name"] == horse_name].iloc[0]
-
-st.write("**Lot:**", horse_row["Lot"])
-st.write("**Age:**", horse_row["Age"])
-st.write("**Sex:**", horse_row["Sex"])
-st.write("**Sire:**", horse_row["Sire"])
-st.write("**Dam:**", horse_row["Dam"])
-st.write("**Vendor:**", horse_row["Vendor"])
-st.write("**Current Bid:**", horse_row["Bid"])
-
-st.write("Paste **one horse per line** (copied from Inglis list):")
-horse_name = st.sidebar.selectbox(
-    "Select a horse",
-    sorted(sale_df["Name"].dropna().unique())
-)
-
-st.write(f"### Selected Horse: {horse_name}")
-# 🔍 Connect to Punting Form API
-from pf_client import search_horse_by_name, get_form, get_ratings, get_speedmap
-
+# =========================================================
+# 4️⃣ CONNECT TO PUNTING FORM
+# =========================================================
 if st.button("🔍 View Punting Form Data"):
     with st.spinner(f"Fetching Punting Form data for {horse_name}..."):
         try:
-            # Step 1: Search the horse on Punting Form
             result = search_horse_by_name(horse_name)
             st.success(f"Found: {result.get('display_name', horse_name)}")
 
-            # Step 2: Retrieve detailed form and ratings (if available)
             form_data = get_form(result.get("horse_id"))
             ratings = get_ratings(result.get("horse_id"))
             speedmap = get_speedmap(result.get("horse_id"))
 
-            # Step 3: Display in expandable sections
             with st.expander("📄 Form Summary"):
                 st.json(form_data)
             with st.expander("📊 Ratings"):
@@ -191,7 +128,14 @@ if st.button("🔍 View Punting Form Data"):
         except Exception as e:
             st.error(f"Could not retrieve data: {e}")
 
-names_text = st.text_area("Horse list", height=220, placeholder="Eleanor Nancy\nFast Intentions\nSir Goldalot\nLittle Spark")
+# =========================================================
+# 5️⃣ DEMO DATA + FILTERING
+# =========================================================
+names_text = st.text_area(
+    "Horse list (optional, for demo mode):",
+    height=220,
+    placeholder="Eleanor Nancy\nFast Intentions\nSir Goldalot\nLittle Spark"
+)
 
 names = [n.strip() for n in names_text.splitlines() if n.strip()]
 unique_names = sorted(set(names)) if names else []
@@ -199,9 +143,12 @@ unique_names = sorted(set(names)) if names else []
 @st.cache_data
 def load_demo_db():
     df = pd.read_csv("data/puntingform_demo.csv")
-    df["name_std"] = (df["horse_name"].str.upper()
-                      .str.replace(r"[^A-Z0-9 ]","", regex=True)
-                      .str.replace(r"\s+"," ", regex=True).str.strip())
+    df["name_std"] = (
+        df["horse_name"].str.upper()
+        .str.replace(r"[^A-Z0-9 ]", "", regex=True)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
     return df
 
 DEMO = None if LIVE else load_demo_db()
@@ -222,7 +169,7 @@ def demo_fuzzy_lookup(name: str):
 def prefetch_summary(names_tuple):
     rows = []
     for n in names_tuple:
-        if not n: 
+        if not n:
             continue
         if LIVE:
             ident = search_horse_by_name(n)
@@ -247,98 +194,4 @@ def prefetch_summary(names_tuple):
                     "yob": d.get("yob"),
                     "sex": d.get("sex"),
                     "maiden": d.get("maiden"),
-                    "avg_benchmark_all": d.get("avg_benchmark_all"),
-                    "last3_L600": d.get("last3_L600"),
-                    "last3_L400": d.get("last3_L400"),
-                    "last3_L200": d.get("last3_L200"),
-                    "starts": d.get("starts"),
-                    "wins": d.get("wins"),
-                    "trainer": d.get("trainer"),
-                    "sp_trend": d.get("sp_trend"),
-                }
-            else:
-                out = {"display_name": n, "_found": False, "_match_score": 0}
-        rows.append(out)
-    return pd.DataFrame(rows)
-
-df = prefetch_summary(tuple(unique_names))
-
-def apply_filters(df):
-    if df.empty: return df
-    out = df.copy()
-    if "yob" in out.columns and out["yob"].notnull().any():
-        this_year = date.today().year
-        out["age"] = this_year - out["yob"]
-        out = out[out["age"] == age]
-    if sex != "Any" and "sex" in out.columns:
-        out = out[out["sex"].str.capitalize() == sex]
-    if maiden != "Any" and "maiden" in out.columns:
-        want = (maiden == "Yes")
-        out = out[out["maiden"] == want]
-    if "avg_benchmark_all" in out.columns and out["avg_benchmark_all"].notnull().any():
-        out = out[out["avg_benchmark_all"] <= bm_cut]
-    return out
-
-left, right = st.columns([1,1])
-
-with left:
-    st.subheader("Filtered horses")
-    filtered = apply_filters(df) if not df.empty else df
-    if filtered.empty:
-        st.info("No horses match filters yet. Paste names and/or relax filters.")
-    else:
-        show_cols = ["display_name","avg_benchmark_all","last3_L600","starts","wins","sex","maiden"]
-        show_cols = [c for c in show_cols if c in filtered.columns]
-        st.dataframe(filtered[show_cols].reset_index(drop=True), use_container_width=True)
-        choice = st.selectbox("Select a horse for full Punting Form data", filtered["display_name"].tolist())
-        st.download_button("Export shortlist (CSV)",
-            data=filtered.to_csv(index=False), file_name="shortlist.csv", mime="text/csv")
-
-with right:
-    st.subheader("Punting Form data")
-    if df.empty or filtered.empty:
-        st.stop()
-    if not choice:
-        st.stop()
-
-    if LIVE:
-        st.warning("Live mode needs mapping from horse → meeting/race to fetch Form/Ratings/Sectionals/Benchmarks. Configure in pf_client & your workflow.")
-        st.caption("Once you have meetingId/raceId for the selected horse, call the functions below and render the tabs.")
-        st.code(
-            "# Example usage (once you have ids):\n"
-            "form = get_form(meeting_id='MEETING_ID')\n"
-            "ratings = get_ratings(meeting_id='MEETING_ID')\n"
-            "speedmap = get_speedmap(race_id='RACE_ID')\n"
-            "sectionals = get_sectionals_csv(meeting_id='MEETING_ID')\n"
-            "benchmarks = get_benchmarks_csv(meeting_id='MEETING_ID')\n"
-        )
-    else:
-        row = filtered[filtered["display_name"] == choice].iloc[0].to_dict()
-        st.markdown(f"**{choice}** — Avg Benchmark (All): {row.get('avg_benchmark_all')} | L600 (Last 3): {row.get('last3_L600')}")
-        tabs = st.tabs(["Overview","Form","Sectionals","Benchmarks","Ratings","Speedmap"])
-        with tabs[0]:
-            k = {
-                "Horse": row.get("horse_name", choice),
-                "Age": (date.today().year - row["yob"]) if row.get("yob") else None,
-                "Sex": row.get("sex"),
-                "Maiden": row.get("maiden"),
-                "Starts": row.get("starts"),
-                "Wins": row.get("wins"),
-                "Trainer": row.get("trainer"),
-                "SP Trend": row.get("sp_trend"),
-                "All Avg Benchmark": row.get("avg_benchmark_all"),
-                "L600 (Last 3)": row.get("last3_L600"),
-                "L400 (Last 3)": row.get("last3_L400"),
-                "L200 (Last 3)": row.get("last3_L200"),
-            }
-            st.table(pd.DataFrame(k.items(), columns=["Metric","Value"]))
-        with tabs[1]:
-            st.caption("Demo: add recent runs here when wired to PF Form.")
-        with tabs[2]:
-            st.caption("Demo: show sectionals table here when wired to MeetingSectionals CSV.")
-        with tabs[3]:
-            st.caption("Demo: show benchmarks table here when wired to MeetingBenchmarks CSV.")
-        with tabs[4]:
-            st.caption("Demo: show ratings table here when wired to MeetingRatings.")
-        with tabs[5]:
-            st.caption("Demo: render speedmap data here when wired to User/Speedmaps.")
+                    "avg_benchmar_
