@@ -1,5 +1,5 @@
 # =========================================================
-# Soar Bloodstock Data - MoneyBall (Stable Filter Build)
+# Soar Bloodstock Data - MoneyBall (Simple Vertical Layout)
 # =========================================================
 import os, io, re, json, base64, traceback
 from datetime import date
@@ -12,31 +12,28 @@ from PIL import Image
 
 st.set_page_config(page_title="Soar Bloodstock Data - MoneyBall", layout="wide")
 
-# ---- Session keys
-DATA_KEY = "SALE_DF"
-CANON_DF_KEY = "CANON_DF"          # normalized dataframe used for filters
-NAME_COL_KEY = "NAME_COL"
-FILTERS_KEY = "FILTERS"
+# ---------------- Session Keys ----------------
+DATA_KEY = "SALE_DF"                 # raw uploaded/pasted dataframe
+CANON_DF_KEY = "CANON_DF"            # normalized dataframe used for filters/table
+NAME_COL_KEY = "NAME_COL"            # chosen name column
+FILTERS_KEY = "FILTERS"              # dict with current filters
 SELECTED_HORSE_KEY = "SELECTED_HORSE"
-LOGO_BYTES_KEY = "LOGO_BYTES"
+LOGO_BYTES_KEY = "LOGO_BYTES"        # saved site logo bytes
 
-# ---- Safe initialization helpers
 DEFAULT_FILTERS = {
-    "age": ["Any"],      # multiselect: ["Any","1","2",...,"10"]
-    "sex": ["Any"],      # multiselect: ["Any","Gelding","Mare","Horse","Colt","Filly"]
-    "state": [],         # multiselect of states
-    "maiden": "Any",     # "Any" | "Yes" | "No"
-    "bm_max": None,      # float or None
-    "applied": False,
+    "age": ["Any"],                  # multiselect of ["Any","1",...,"10"]
+    "sex": ["Any"],                  # ["Any","Gelding","Mare","Horse","Colt","Filly"]
+    "state": [],                     # list of states
+    "maiden": "Any",                 # "Any"|"Yes"|"No"
+    "bm_max": None,                  # float or None (Lowest All Avg Benchmark ceiling)
+    "applied": False,                # if False, show full list
 }
 
 def ensure_filters():
-    """Ensure FILTERS_KEY exists and has all required keys."""
     f = st.session_state.get(FILTERS_KEY)
     if not isinstance(f, dict):
         st.session_state[FILTERS_KEY] = DEFAULT_FILTERS.copy()
         return
-    # backfill any missing keys
     changed = False
     for k, v in DEFAULT_FILTERS.items():
         if k not in f:
@@ -47,9 +44,7 @@ def ensure_filters():
 
 ensure_filters()
 
-# =========================================================
-# Optional PF client (won't break UI if missing)
-# =========================================================
+# ---------------- Optional PF client ----------------
 PF_AVAILABLE = False
 try:
     from pf_client import (
@@ -64,16 +59,14 @@ try:
 except Exception:
     PF_AVAILABLE = False
 
-# =========================================================
-# UI helpers
-# =========================================================
+# ---------------- Small UI helpers ----------------
 def center_logo_html(img_bytes: Optional[bytes]) -> str:
     if not img_bytes:
         return ""
     b64 = base64.b64encode(img_bytes).decode("utf-8")
     return f"""
-<div style="display:flex;justify-content:center;margin-top:-8px;margin-bottom:8px;">
-  <img src="data:image/png;base64,{b64}" style="max-height:80px;" />
+<div style="display:flex;justify-content:center;margin-top:-8px;margin-bottom:10px;">
+  <img src="data:image/png;base64,{b64}" style="max-height:84px;" />
 </div>
 """
 
@@ -81,9 +74,7 @@ def show_logo_top():
     if st.session_state.get(LOGO_BYTES_KEY):
         st.markdown(center_logo_html(st.session_state[LOGO_BYTES_KEY]), unsafe_allow_html=True)
 
-# =========================================================
-# Data normalization
-# =========================================================
+# ---------------- Column mapping & normalization ----------------
 HEADER_ALIASES = {
     "Name": [r"^name$", r"^horse\s*name$", r"^horse$", r"^lot\s*name$"],
     "Age": [r"^age$", r"^yob$", r"^year\s*of\s*birth$"],
@@ -146,7 +137,7 @@ def detect_benchmark_columns(df: pd.DataFrame) -> List[str]:
     for pattern in HEADER_ALIASES["Benchmark_any"]:
         rgx = re.compile(pattern, re.I)
         out += [c for c in cols if rgx.search(c)]
-    return list(dict.fromkeys(out))  # unique, preserve order
+    return list(dict.fromkeys(out))  # unique, order kept
 
 def derive_age(col_age: Optional[pd.Series], col_yob: Optional[pd.Series]) -> pd.Series:
     if col_age is not None:
@@ -156,12 +147,13 @@ def derive_age(col_age: Optional[pd.Series], col_yob: Optional[pd.Series]) -> pd
     if col_yob is not None:
         yob = pd.to_numeric(col_yob, errors="coerce")
         return date.today().year - yob
-    return pd.Series(np.nan, index=(col_age.index if col_age is not None else col_yob.index if col_yob is not None else []))
+    # no age/yob columns: return NaN series on a safe index
+    idx = col_age.index if col_age is not None else (col_yob.index if col_yob is not None else pd.RangeIndex(0))
+    return pd.Series(np.nan, index=idx)
 
-def canonize(df_raw: pd.DataFrame, debug: Dict[str, Any]) -> pd.DataFrame:
+def canonize(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = clean_headers(df_raw)
     cols = list(df.columns)
-    debug["clean_columns"] = cols
 
     # Name
     nm_col = find_first_match(cols, HEADER_ALIASES["Name"]) or ("Name" if "Name" in cols else None)
@@ -189,13 +181,6 @@ def canonize(df_raw: pd.DataFrame, debug: Dict[str, Any]) -> pd.DataFrame:
     sire_col  = find_first_match(cols, HEADER_ALIASES["Sire"])
     dam_col   = find_first_match(cols, HEADER_ALIASES["Dam"])
     vendor_col= find_first_match(cols, HEADER_ALIASES["Vendor"])
-
-    debug["mapped"] = {
-        "Name": nm_col, "Age_col": age_col, "YOB_col": yob_col,
-        "Sex": sex_col, "State": state_col, "Maiden": maiden_col, "Wins": wins_col,
-        "Benchmark_candidates": bm_candidates,
-        "Bid": bid_col, "Lot": lot_col, "Sire": sire_col, "Dam": dam_col, "Vendor": vendor_col,
-    }
 
     out = pd.DataFrame()
     out["Name"] = df[nm_col].astype(str)
@@ -246,16 +231,13 @@ def canonize(df_raw: pd.DataFrame, debug: Dict[str, Any]) -> pd.DataFrame:
         else:
             out[label] = None
 
-    debug["samples"] = out.head(8).to_dict(orient="records")
     return out
 
-# =========================================================
-# Sidebar: settings + data input
-# =========================================================
+# ---------------- Sidebar: Page settings ----------------
 with st.sidebar.expander("⚙️ Page settings", expanded=False):
-    logo = st.file_uploader("Upload logo (png/jpg)", type=["png","jpg","jpeg"])
-    c1, c2 = st.columns(2)
-    with c1:
+    logo = st.file_uploader("Upload logo (png/jpg)", type=["png","jpg","jpeg"], key="logo_upl")
+    col_a, col_b = st.columns(2)
+    with col_a:
         if st.button("Save logo"):
             if logo:
                 try:
@@ -268,16 +250,17 @@ with st.sidebar.expander("⚙️ Page settings", expanded=False):
                     st.error(f"Logo error: {e}")
             else:
                 st.info("Choose a file first.")
-    with c2:
+    with col_b:
         if st.button("Clear logo"):
             st.session_state[LOGO_BYTES_KEY] = None
             st.success("Logo cleared.")
 
+# ---------------- Sidebar: Data input ----------------
 with st.sidebar.expander("🧾 Horse list", expanded=True):
     mode = st.radio("Source", ["Upload CSV/Excel", "Paste", "Keep current"], index=0)
 
     if mode == "Upload CSV/Excel":
-        up = st.file_uploader("Upload", type=["csv","xlsx"])
+        up = st.file_uploader("Upload", type=["csv","xlsx"], key="file_upl")
         if up:
             try:
                 if up.name.lower().endswith(".xlsx"):
@@ -305,20 +288,16 @@ with st.sidebar.expander("🧾 Horse list", expanded=True):
         else:
             st.info("No current data yet.")
 
-# =========================================================
-# Build canonical dataframe
-# =========================================================
+# ---------------- Top of page ----------------
 show_logo_top()
 st.title("Soar Bloodstock Data — MoneyBall")
 
 base_df = st.session_state.get(DATA_KEY, pd.DataFrame())
-debug_map: Dict[str, Any] = {}
-
 if base_df.empty:
     st.info("Upload or paste your list in the sidebar to begin.")
     st.stop()
 
-# Choose which column is the horse name (defensive)
+# Let user confirm which column is the horse name
 clean = clean_headers(base_df)
 auto_name = None
 for pat in HEADER_ALIASES["Name"]:
@@ -328,41 +307,37 @@ for pat in HEADER_ALIASES["Name"]:
         break
 
 name_col = st.selectbox(
-    "Pick the column that contains horse names:",
+    "Select the column that contains horse names:",
     options=list(clean.columns),
     index=(list(clean.columns).index(auto_name) if (auto_name in clean.columns) else 0),
 )
 st.session_state[NAME_COL_KEY] = name_col
 
 work_df = clean.rename(columns={name_col: "Name"}) if name_col != "Name" else clean
-canon_df = canonize(work_df, debug_map)
+canon_df = canonize(work_df)
 st.session_state[CANON_DF_KEY] = canon_df
 
-# =========================================================
-# Filters (safe defaults)
-# =========================================================
+# ---------------- Sidebar: Filters (simple + Apply) ----------------
 fstate = st.session_state.get(FILTERS_KEY, DEFAULT_FILTERS.copy())
-
 with st.sidebar.expander("🔎 Filters", expanded=True):
     ages = ["Any"] + [str(i) for i in range(1, 11)]
-    sel_age = st.multiselect("Age", ages, default=fstate.get("age", ["Any"]))
+    sel_age = st.multiselect("Age (choose one or more)", ages, default=fstate.get("age", ["Any"]))
 
     sexes = ["Any", "Gelding", "Mare", "Horse", "Colt", "Filly"]
-    sel_sex = st.multiselect("Sex", sexes, default=fstate.get("sex", ["Any"]))
+    sel_sex = st.multiselect("Sex (choose one or more)", sexes, default=fstate.get("sex", ["Any"]))
 
     state_options = sorted(canon_df["State"].dropna().astype(str).unique().tolist())
-    # keep only still-valid defaults
     prev_states = [s for s in fstate.get("state", []) if s in state_options]
-    sel_state = st.multiselect("State", state_options, default=prev_states)
+    sel_state = st.multiselect("State (choose one or more)", state_options, default=prev_states)
 
     maiden = st.selectbox("Maiden", ["Any", "Yes", "No"], index=["Any","Yes","No"].index(fstate.get("maiden","Any")))
 
     bm_default = "" if fstate.get("bm_max") is None else str(fstate["bm_max"])
-    bm_input = st.text_input("Lowest achieved All Avg Benchmark (max)", value=bm_default)
+    bm_input = st.text_input("Lowest achieved All Avg Benchmark (max)", value=bm_default, placeholder="e.g. -2.0")
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("✅ Apply"):
+        if st.button("✅ Apply filters"):
             st.session_state[FILTERS_KEY] = {
                 "age": sel_age if sel_age else ["Any"],
                 "sex": sel_sex if sel_sex else ["Any"],
@@ -373,11 +348,11 @@ with st.sidebar.expander("🔎 Filters", expanded=True):
             }
             ensure_filters()
     with c2:
-        if st.button("♻️ Reset"):
+        if st.button("♻️ Reset filters"):
             st.session_state[FILTERS_KEY] = DEFAULT_FILTERS.copy()
             ensure_filters()
 
-# Use a fresh copy of filter state now that it may have been updated
+# Use (possibly updated) filters
 fstate = st.session_state.get(FILTERS_KEY, DEFAULT_FILTERS.copy())
 
 def apply_filters(df: pd.DataFrame, fs: Dict[str, Any]) -> pd.DataFrame:
@@ -415,68 +390,65 @@ def apply_filters(df: pd.DataFrame, fs: Dict[str, Any]) -> pd.DataFrame:
 
 filtered = apply_filters(canon_df, fstate) if fstate.get("applied", False) else canon_df
 
-# =========================================================
-# Debug panel (helps diagnose filter issues)
-# =========================================================
-with st.expander("🧪 Debug (what the app sees)"):
-    st.write("**Mapped columns & samples:**")
-    st.json(debug_map)
-    st.write("**Filter state:**")
-    st.json(st.session_state.get(FILTERS_KEY, DEFAULT_FILTERS.copy()))
+# ---------------- MAIN: Filtered list (table) ----------------
+st.subheader("📋 Filtered Sale Horses")
+if filtered.empty:
+    st.warning("No rows match the current filters.")
+else:
+    cols_to_show = [c for c in ["Lot","Name","Age","Sex","State","Wins","Maiden","Bid","Lowest All Avg Benchmark"] if c in filtered.columns]
+    st.dataframe(filtered[cols_to_show].reset_index(drop=True), use_container_width=True)
 
-# =========================================================
-# Main layout
-# =========================================================
-left, right = st.columns([1,1])
+# Choose a horse from the filtered set
+available_names = sorted(filtered["Name"].dropna().astype(str).unique().tolist())
+chosen = st.selectbox("Pick a horse from the filtered list", options=["(none)"] + available_names, index=0)
+if chosen != "(none)":
+    st.session_state[SELECTED_HORSE_KEY] = chosen
 
-with left:
-    st.subheader("📋 Filtered Sale Horses")
-    if filtered.empty:
-        st.warning("No rows match the current filters.")
-    else:
-        view_cols = [c for c in ["Lot","Name","Age","Sex","State","Wins","Maiden","Bid","Lowest All Avg Benchmark"] if c in filtered.columns]
-        st.dataframe(filtered[view_cols].reset_index(drop=True), use_container_width=True)
+# ---------------- SELECTED HORSE (below) ----------------
+st.markdown("---")
+st.subheader("🎯 Selected Horse")
 
-        chosen = st.selectbox(
-            "Select a horse",
-            options=sorted(filtered["Name"].dropna().astype(str).unique())
-        )
-        if chosen:
-            st.session_state[SELECTED_HORSE_KEY] = chosen
+sel = st.session_state.get(SELECTED_HORSE_KEY)
+if not sel:
+    st.info("Select a horse from the filtered list above.")
+else:
+    # details row (prefer filtered, fall back to canon_df)
+    row = filtered[filtered["Name"].astype(str) == str(sel)]
+    if row.empty:
+        row = canon_df[canon_df["Name"].astype(str) == str(sel)]
+    d = row.iloc[0].to_dict() if not row.empty else {"Name": sel}
 
-with right:
-    st.subheader("🎯 Selected Horse")
-    sel = st.session_state.get(SELECTED_HORSE_KEY)
-    if not sel:
-        st.info("Pick a horse on the left.")
-    else:
-        row = filtered[filtered["Name"].astype(str) == str(sel)]
-        if row.empty:
-            row = canon_df[canon_df["Name"].astype(str) == str(sel)]
-        d = row.iloc[0].to_dict() if not row.empty else {"Name": sel}
-
-        st.markdown(f"### {d.get('Name', sel)}")
-        fields = ["Lot","Age","Sex","State","Wins","Maiden","Bid","Lowest All Avg Benchmark","Sire","Dam","Vendor"]
-        pairs = [(k, d[k]) for k in fields if k in d and (pd.notna(d[k]) and str(d[k]).strip() != "")]
-        if pairs:
-            st.table(pd.DataFrame(pairs, columns=["Field","Value"]))
+    # ---- "View PF data" button ABOVE the details, as requested ----
+    st.markdown("##### 📡 Punting Form")
+    if PF_AVAILABLE:
+        if pf_is_live():
+            st.success("PF client connected.")
         else:
-            st.caption("No extra fields present in the file.")
+            st.warning("PF client imported, but not live. Check your API key/paths in secrets.")
+    else:
+        st.info("pf_client.py not found — PF calls disabled (UI still works).")
 
-        # ---- Optional PF tester ----
-        st.markdown("#### 📡 Punting Form (tester)")
+    # Button to show PF data (you will still need meeting/race IDs in real use)
+    view_clicked = st.button("🔍 View Punting Form Data (demo/test)")
+
+    # Horse details
+    st.markdown(f"### {d.get('Name', sel)}")
+    fields = ["Lot","Age","Sex","State","Wins","Maiden","Bid","Lowest All Avg Benchmark","Sire","Dam","Vendor"]
+    pairs = [(k, d[k]) for k in fields if k in d and (pd.notna(d[k]) and str(d[k]).strip() != "")]
+    if pairs:
+        st.table(pd.DataFrame(pairs, columns=["Field","Value"]))
+    else:
+        st.caption("No extra fields present in the file.")
+
+    # PF test panel (kept simple/optional)
+    if view_clicked:
         if not PF_AVAILABLE:
-            st.info("pf_client not importable (filters still work). Add pf_client.py and secrets to enable.")
+            st.info("PF disabled in this environment (missing pf_client.py).")
         else:
-            if pf_is_live():
-                st.success("PF client reachable.")
-            else:
-                st.warning("PF client imported, but not confirmed live. Check your secrets.")
-
-            with st.expander("Connectivity test", expanded=False):
+            with st.expander("PF quick tester"):
                 endpoint = st.selectbox("Endpoint", ["Ratings/MeetingBenchmarks","Ratings/MeetingSectionals","Ratings/MeetingRatings"])
                 meeting_id = st.text_input("meetingId (integer)", value="")
-                if st.button("Test PF call"):
+                if st.button("Run test"):
                     try:
                         if not meeting_id.strip().isdigit():
                             st.warning("Enter a numeric meetingId.")
