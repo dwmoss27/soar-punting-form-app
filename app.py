@@ -6,10 +6,10 @@ from typing import Optional
 
 import streamlit as st
 import pandas as pd
-from PIL import Image  # for validating/decoding uploaded logo images
+from PIL import Image  # validate/preview uploaded logo images
 
-# ---- Punting Form client (keep pf_client.py in your repo) ----
-# pf_client should read secrets.toml for:
+# ---- Punting Form client (pf_client.py must be in repo) ----
+# pf_client should read secrets for:
 # PF_BASE_URL, PF_PATH_SEARCH, PF_PATH_FORM, PF_PATH_RATINGS, PF_PATH_SPEEDMAP,
 # PF_PATH_SECTIONALS, PF_PATH_BENCHMARKS, PF_API_KEY
 from pf_client import (
@@ -22,14 +22,14 @@ from pf_client import (
 # ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Soar Bloodstock Data - MoneyBall", layout="wide")
 
-SALE_BYTES_KEY   = "sale_uploaded_bytes"
-SALE_NAME_KEY    = "sale_uploaded_name"
-LOGO_BYTES_KEY   = "logo_bytes"
-FILTERS_KEY      = "filters"
-HIDE_INPUTS_KEY  = "hide_inputs"
+SALE_BYTES_KEY     = "sale_uploaded_bytes"
+SALE_NAME_KEY      = "sale_uploaded_name"
+LOGO_BYTES_KEY     = "logo_bytes"
+FILTERS_KEY        = "filters"
+HIDE_INPUTS_KEY    = "hide_inputs"
 SELECTED_HORSE_KEY = "selected_name"
 
-# Default session values
+# Defaults
 st.session_state.setdefault(FILTERS_KEY, {
     "age_any": True,
     "age_selected": [],
@@ -54,7 +54,7 @@ def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=clean)
 
 def detect_name_col(cols) -> Optional[str]:
-    """Find a column that looks like the horse name column."""
+    """Find a column that looks like a horse name column."""
     norm = {re.sub(r"\s+", "", c).lower(): c for c in cols}
     for cand in ["name", "horse", "horse name", "horsename", "lot name"]:
         key = re.sub(r"\s+", "", cand).lower()
@@ -110,11 +110,11 @@ def show_kv(label, value):
         st.write(f"**{label}:**", value)
 
 # ──────────────────────────────────────────────────────────────
-# Top area: title + (optional) centered logo via Settings tab
+# Title + (optional) centered logo (from Settings tab)
 # ──────────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
-    # Try to render a valid image only if we truly have image bytes
+    # Render a valid image only if we have true image bytes
     logo_data = st.session_state.get(LOGO_BYTES_KEY, None)
     if logo_data:
         try:
@@ -122,7 +122,6 @@ with col2:
                 img = Image.open(io.BytesIO(logo_data))
                 st.image(img, use_container_width=False)
             else:
-                # Anything else is invalid — clear it so we don't crash again
                 st.session_state.pop(LOGO_BYTES_KEY, None)
                 st.warning("⚠️ Saved logo was invalid and has been cleared. Please re-upload under Settings.")
         except Exception:
@@ -131,7 +130,7 @@ with col2:
     st.title("Soar Bloodstock Data - MoneyBall")
 
 # ──────────────────────────────────────────────────────────────
-# App Tabs: App  |  Settings
+# Tabs: App  |  Settings
 # ──────────────────────────────────────────────────────────────
 tab_app, tab_settings = st.tabs(["App", "Settings"])
 
@@ -149,9 +148,8 @@ with tab_settings:
         if st.button("💾 Save logo", use_container_width=True):
             if logo_up and hasattr(logo_up, "getvalue"):
                 raw = logo_up.getvalue()
-                # Validate it's an image before saving
                 try:
-                    _ = Image.open(io.BytesIO(raw))  # will raise if not a real image
+                    _ = Image.open(io.BytesIO(raw))  # validate
                     st.session_state[LOGO_BYTES_KEY] = raw
                     st.success("Logo saved for this session. It will appear at the top.")
                     st.rerun()
@@ -199,7 +197,6 @@ with tab_app:
             else:
                 st.success(f"Using saved: {st.session_state[SALE_NAME_KEY]}")
 
-        # Build sale_df from chosen source
         def build_sale_df_from_mode():
             if mode == "Upload file" and upload_file is not None:
                 return load_dataframe_from_bytes(upload_file.getvalue(), upload_file.name)
@@ -211,7 +208,6 @@ with tab_app:
 
         sale_df = build_sale_df_from_mode()
 
-        # Hide inputs toggle
         if st.button("✅ Save & hide data inputs"):
             st.session_state[HIDE_INPUTS_KEY] = True
             st.success("Inputs hidden. Use the Settings tab for logo; unhide inputs with the button below.")
@@ -220,23 +216,21 @@ with tab_app:
         st.caption("Need to switch inputs later? Unhide below.")
         if st.button("👀 Unhide data inputs"):
             st.session_state[HIDE_INPUTS_KEY] = False
-            st.experimental_rerun()
+            st.rerun()
 
     else:
-        # Data inputs hidden, but still need to construct sale_df from saved
+        # Inputs hidden: reconstruct sale_df from saved upload if present
         sale_df = None
-        # Prefer saved upload if present
         if (SALE_BYTES_KEY in st.session_state) and (SALE_NAME_KEY in st.session_state):
             try:
                 sale_df = load_dataframe_from_bytes(st.session_state[SALE_BYTES_KEY], st.session_state[SALE_NAME_KEY])
             except Exception as e:
                 st.error(f"Saved upload failed to load: {e}")
         if sale_df is None:
-            # fallback empty frame
             sale_df = pd.DataFrame({"Name": []})
         if st.button("👀 Unhide data inputs"):
             st.session_state[HIDE_INPUTS_KEY] = False
-            st.experimental_rerun()
+            st.rerun()
 
     # Normalize + detect name column
     sale_df = clean_headers(sale_df)
@@ -251,7 +245,7 @@ with tab_app:
     # ──────────────────────────────────────────────────────────
     st.subheader("Filters")
 
-    ages_all = list(range(1, 11))  # 1..10 (plus 'Any' checkbox)
+    ages_all = list(range(1, 11))  # 1..10
     age_any = st.checkbox("Any age", value=st.session_state[FILTERS_KEY]["age_any"])
     age_selected = st.multiselect("Ages", ages_all, default=st.session_state[FILTERS_KEY]["age_selected"], disabled=age_any)
 
@@ -278,7 +272,7 @@ with tab_app:
             "state_selected": state_selected,
         }
         st.success("Filters applied.")
-        st.experimental_rerun()
+        st.rerun()
 
     # Filter summary
     fs = st.session_state[FILTERS_KEY]
@@ -364,34 +358,35 @@ with tab_app:
             mime="text/csv",
         )
 
-    # Select horse (require from filtered list if available)
+    # Selection area (prefers filtered list if available)
     candidate_source = filtered_df if not filtered_df.empty else sale_df
     all_names = sorted(candidate_source[name_col].dropna().astype(str).unique())
-    # Keep previously selected if still present
+
+    # Preserve previously selected horse if possible
     default_index = 0
     if st.session_state.get(SELECTED_HORSE_KEY) in all_names:
         default_index = all_names.index(st.session_state[SELECTED_HORSE_KEY]) + 1
+
     selected_name = st.selectbox("Selected horse", options=["—"] + all_names, index=default_index)
 
-    # update selected in session when user picks from dropdown
     if selected_name and selected_name != "—":
         st.session_state[SELECTED_HORSE_KEY] = selected_name
 
-    # Shortcut: pick directly from filtered names to sync the selected horse
+    # Quick-pick from filtered list (syncs selected)
     st.caption("Tip: picking a name here updates the ‘Selected horse’ above.")
     quick_pick = st.selectbox("Pick from filtered list", options=["—"] + all_names, key="quickpick")
     if quick_pick and quick_pick != "—" and quick_pick != st.session_state.get(SELECTED_HORSE_KEY):
         st.session_state[SELECTED_HORSE_KEY] = quick_pick
-        st.experimental_rerun()
+        st.rerun()
 
     # ──────────────────────────────────────────────────────────
-    # Selected horse details + PF data button (above divider)
+    # Selected horse details + PF data button
     # ──────────────────────────────────────────────────────────
     if st.session_state.get(SELECTED_HORSE_KEY):
         sel = st.session_state[SELECTED_HORSE_KEY]
         st.write(f"### Selected Horse: {sel}")
 
-        # View PF data button (here, above divider)
+        # View PF data button placed above details
         if st.button("🔎 View Punting Form Data"):
             with st.spinner(f"Searching Punting Form for “{sel}”…"):
                 try:
@@ -424,7 +419,7 @@ with tab_app:
 
         st.divider()
 
-        # show sale fields for selected horse
+        # Show sale fields for selected horse
         hr = candidate_source[candidate_source[name_col].astype(str) == str(sel)]
         if not hr.empty:
             row = hr.iloc[0].to_dict()
