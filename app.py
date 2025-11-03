@@ -1,590 +1,381 @@
-# =========================
+# ===============================
 # Soar Bloodstock Data - MoneyBall
-# Full App (upload/paste/save list, filters, PF integration w/ fallback)
-# =========================
+# Stable build: working filters + PF connectivity test
+# ===============================
 
 import os, sys, io, base64, json, re, traceback
 from datetime import date
-from typing import List, Dict, Any, Optional
+from typing import Optional, List, Dict, Any
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 from PIL import Image
 
-# --------------------------
-# PAGE CONFIG
-# --------------------------
+# ---------- Page config ----------
 st.set_page_config(
     page_title="Soar Bloodstock Data - MoneyBall",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# --------------------------
-# SESSION KEYS
-# --------------------------
-DATA_KEY = "SBM_SALE_DF"                # stores DataFrame (sale horses)
-DATA_SOURCE_KEY = "SBM_SALE_SOURCE"     # "uploaded" | "pasted"
-SAVED_UPLOAD_BYTES_KEY = "SBM_SAVED_UPLOAD_BYTES"
-LOGO_BYTES_KEY = "SBM_LOGO_BYTES"
-FILTERS_KEY = "SBM_FILTERS"
-SELECTED_HORSE_KEY = "SBM_SELECTED_HORSE"
-SHORTLIST_KEY = "SBM_SHORTLIST"
-EMBED_PF_PANEL_OPEN_KEY = "SBM_EMBED_OPEN"
-PF_AVAILABLE_KEY = "SBM_PF_AVAILABLE"
+# ---------- Session keys ----------
+DATA_KEY = "SALE_DF"
+NAME_COL_KEY = "NAME_COL"
+LOGO_BYTES_KEY = "LOGO_BYTES"
+FILTERS_KEY = "FILTERS"
+SELECTED_HORSE_KEY = "SELECTED_HORSE"
+SHORTLIST_KEY = "SHORTLIST"
 
-# Initialize defaults
 if FILTERS_KEY not in st.session_state:
     st.session_state[FILTERS_KEY] = {
-        "ages": ["Any"],
-        "sexes": ["Any"],
-        "states": [],
-        "maiden": "Any",                   # "Any" | "Yes" | "No"
-        "lowest_all_avg_bm_max": None,    # float or None
-        "apply_clicked": False,
+        "age_opts": ["Any"],          # ["Any"] or list of str ages
+        "sex_opts": ["Any"],          # ["Any"] or chosen sexes
+        "state_opts": [],             # list of chosen states
+        "maiden": "Any",              # "Any" | "Yes" | "No"
+        "bm_max": None,               # float / None
+        "applied": False,
     }
 
 if SHORTLIST_KEY not in st.session_state:
     st.session_state[SHORTLIST_KEY] = []
 
-if EMBED_PF_PANEL_OPEN_KEY not in st.session_state:
-    st.session_state[EMBED_PF_PANEL_OPEN_KEY] = False
+# ---------- Helpers ----------
+def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
+    mapping = {}
+    for c in df.columns:
+        x = str(c).replace("\ufeff","")
+        x = re.sub(r"\s+"," ", x).strip()
+        mapping[c] = x
+    return df.rename(columns=mapping)
 
-# ------------------------------------------------------
-# pf_client FALLBACK SHIM (lets UI run even if missing)
-# ------------------------------------------------------
-PF_IMPORT_ERROR = None
-PF_AVAILABLE = False
+def detect_name_col(cols: List[str]) -> Optional[str]:
+    # smart guess for name column
+    norm = {re.sub(r"\s+","", c).lower(): c for c in cols}
+    for cand in ["name","horse","horse name","horsename","lot name"]:
+        k = cand.replace(" ", "").lower()
+        if k in norm:
+            return norm[k]
+    for c in cols:
+        if "name" in c.lower():
+            return c
+    return None
 
-def _add_here_to_path():
+def center_logo_html(img_bytes: Optional[bytes]) -> str:
+    if not img_bytes:
+        return ""
+    b64 = base64.b64encode(img_bytes).decode("utf-8")
+    return f"""
+<div style="display:flex;justify-content:center;margin-top:-8px;">
+  <img src="data:image/png;base64,{b64}" style="max-height:80px;" />
+</div>
+"""
+
+def show_logo_top():
+    if LOGO_BYTES_KEY in st.session_state and st.session_state[LOGO_BYTES_KEY]:
+        st.markdown(center_logo_html(st.session_state[LOGO_BYTES_KEY]), unsafe_allow_html=True)
+
+def ensure_age_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "Age" not in df.columns:
+        if "yob" in df.columns:
+            df = df.copy()
+            df["Age"] = date.today().year - pd.to_numeric(df["yob"], errors="coerce")
+        else:
+            df = df.copy()
+            df["Age"] = np.nan
+    return df
+
+def coerce_float(s):
     try:
-        here = os.path.dirname(__file__)
-        if here and here not in sys.path:
-            sys.path.append(here)
+        return float(s)
     except Exception:
-        pass
+        return np.nan
 
-_add_here_to_path()
+# ---------- PF client import with safe fallback ----------
+PF_AVAILABLE = False
+PF_IMPORT_ERROR = None
 
 try:
     from pf_client import (
-        is_live as _pf_is_live,
-        search_horse_by_name as _pf_search_horse_by_name,
-        get_form as _pf_get_form,
-        get_ratings as _pf_get_ratings,
-        get_meeting_sectionals as _pf_get_meeting_sectionals,
-        get_meeting_benchmarks as _pf_get_meeting_benchmarks,
-        get_results as _pf_get_results,
-        get_strike_rate as _pf_get_strike_rate,
-        get_southcoast_export as _pf_get_southcoast_export,
+        is_live as pf_is_live,
+        search_horse_by_name,
+        get_meeting_benchmarks,
+        get_meeting_sectionals,
+        get_meeting_ratings,
+        pf_raw_get,           # for tester
     )
     PF_AVAILABLE = True
 except Exception as e:
     PF_IMPORT_ERROR = e
     PF_AVAILABLE = False
 
-def is_live() -> bool:
-    return PF_AVAILABLE and _pf_is_live() if PF_AVAILABLE else False
-
-def pf_search_horse_by_name(name: str) -> Dict[str, Any]:
-    if PF_AVAILABLE:
-        return _pf_search_horse_by_name(name)
-    return {"found": False, "display_name": name, "horse_id": None}
-
-def pf_get_form(horse_id: Any) -> Dict[str, Any]:
-    if PF_AVAILABLE:
-        return _pf_get_form(horse_id)
-    return {"note": "pf_client not available; demo form."}
-
-def pf_get_ratings(meeting_id: Any) -> Dict[str, Any]:
-    if PF_AVAILABLE:
-        return _pf_get_ratings(meeting_id)
-    return {"note": "pf_client not available; demo ratings."}
-
-def pf_get_meeting_sectionals(meeting_id: Any) -> Dict[str, Any]:
-    if PF_AVAILABLE:
-        return _pf_get_meeting_sectionals(meeting_id)
-    return {"note": "pf_client not available; demo sectionals."}
-
-def pf_get_meeting_benchmarks(meeting_id: Any) -> Dict[str, Any]:
-    if PF_AVAILABLE:
-        return _pf_get_meeting_benchmarks(meeting_id)
-    return {"note": "pf_client not available; demo benchmarks."}
-
-def pf_get_results() -> Dict[str, Any]:
-    if PF_AVAILABLE:
-        return _pf_get_results()
-    return {"note": "pf_client not available; demo results."}
-
-def pf_get_strike_rate() -> Dict[str, Any]:
-    if PF_AVAILABLE:
-        return _pf_get_strike_rate()
-    return {"note": "pf_client not available; demo strikerate."}
-
-def pf_get_southcoast_export(meeting_id: Any) -> Dict[str, Any]:
-    if PF_AVAILABLE:
-        return _pf_get_southcoast_export(meeting_id)
-    return {"note": "pf_client not available; demo southcoast export."}
-
-st.session_state[PF_AVAILABLE_KEY] = PF_AVAILABLE
-
-# Helpful banner
-if not PF_AVAILABLE:
-    with st.sidebar:
-        st.warning(
-            "⚠️ `pf_client` not importable — running in **Demo Mode**.\n\n"
-            "UI & filters work. PF calls will show demo placeholders.\n\n"
-            "To enable live PF:\n"
-            "1) Add `pf_client.py` next to `app.py` (committed to GitHub).\n"
-            "2) Set secrets `PF_API_KEY`, and if needed `PF_BASE_URL` & paths.\n"
-            "3) Confirm endpoints in `pf_client.py`.\n"
-        )
-
-# ------------------------------------------------------
-# UTILS
-# ------------------------------------------------------
-def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
-    mapping = {}
-    for c in df.columns:
-        x = str(c).replace("\ufeff", "")
-        x = re.sub(r"\s+", " ", x).strip()
-        mapping[c] = x
-    return df.rename(columns=mapping)
-
-def detect_name_col(cols: List[str]) -> Optional[str]:
-    norm = {re.sub(r"\s+", "", c).lower(): c for c in cols}
-    candidates = ["name", "horse", "horse name", "horsename", "lot name"]
-    for cand in candidates:
-        key = cand.replace(" ", "").lower()
-        if key in norm:
-            return norm[key]
-    for c in cols:
-        if "name" in c.lower():
-            return c
-    return None
-
-def compute_has_won(row: Dict[str, Any]) -> Optional[bool]:
-    # if there is an explicit Wins column
-    for k in ("Wins", "wins"):
-        if k in row and pd.notnull(row[k]):
-            try:
-                return int(str(row[k]).split(".")[0]) > 0
-            except Exception:
-                pass
-    return None
-
-def derive_lowest_bm_placeholder(df: pd.DataFrame) -> pd.DataFrame:
-    # If no PF integration yet, create a placeholder column if missing
-    if "Lowest All Avg Benchmark" not in df.columns:
-        # fake metric: if we have "All Avg Benchmark" use that, else NaN
-        if "All Avg Benchmark" in df.columns:
-            df["Lowest All Avg Benchmark"] = df["All Avg Benchmark"]
-        else:
-            df["Lowest All Avg Benchmark"] = np.nan
-    return df
-
-def save_bytes_to_session(key: str, fbytes: bytes):
-    st.session_state[key] = fbytes
-
-def get_logo_html_center(img_bytes: Optional[bytes]) -> str:
-    if not img_bytes:
-        return ""
-    b64 = base64.b64encode(img_bytes).decode("utf-8")
-    return (
-        f'<div style="display:flex;justify-content:center;">'
-        f'<img src="data:image/png;base64,{b64}" style="max-height:80px;">'
-        f"</div>"
-    )
-
-def display_logo_top_center():
-    html = get_logo_html_center(st.session_state.get(LOGO_BYTES_KEY))
-    if html:
-        st.markdown(html, unsafe_allow_html=True)
-
-# ------------------------------------------------------
-# TOP BAR (Title + Centered Logo)
-# ------------------------------------------------------
-display_logo_top_center()
+# ---------- Top: Logo + Title ----------
+show_logo_top()
 st.title("Soar Bloodstock Data — MoneyBall")
 
-# ------------------------------------------------------
-# SIDEBAR: PAGE SETTINGS (Logo upload/save), PF settings help
-# ------------------------------------------------------
-with st.sidebar.expander("⚙️ Page Settings", expanded=False):
-    st.write("Upload a logo and press **Save** to persist for this session.")
-    logo_file = st.file_uploader("Upload logo (PNG/JPG)", type=["png", "jpg", "jpeg"], key="logo_uploader")
-    col_lg1, col_lg2 = st.columns([1,1])
-    with col_lg1:
+# ---------- Sidebar: Page Settings ----------
+with st.sidebar.expander("⚙️ Page settings", expanded=False):
+    logo = st.file_uploader("Upload logo (png/jpg)", type=["png","jpg","jpeg"])
+    c1, c2 = st.columns(2)
+    with c1:
         if st.button("Save logo"):
-            if logo_file:
+            if logo:
                 try:
-                    image = Image.open(logo_file).convert("RGBA")
+                    img = Image.open(logo).convert("RGBA")
                     buf = io.BytesIO()
-                    image.save(buf, format="PNG")
-                    save_bytes_to_session(LOGO_BYTES_KEY, buf.getvalue())
-                    st.success("Logo saved for this session.")
+                    img.save(buf, format="PNG")
+                    st.session_state[LOGO_BYTES_KEY] = buf.getvalue()
+                    st.success("Logo saved.")
                 except Exception as e:
-                    st.error(f"Could not process logo: {e}")
+                    st.error(f"Logo error: {e}")
             else:
-                st.info("Select a logo file first.")
-    with col_lg2:
+                st.info("Choose a file first.")
+    with c2:
         if st.button("Clear logo"):
             st.session_state[LOGO_BYTES_KEY] = None
             st.success("Logo cleared.")
 
-with st.sidebar.expander("🔑 Punting Form Settings", expanded=False):
-    live_flag = is_live()
-    st.write("**Mode:** " + ("Live (PF API reachable)" if live_flag else "Demo"))
-    st.caption(
-        "To enable live:\n"
-        "- Ensure `pf_client.py` exists next to `app.py`\n"
-        "- Add Streamlit secrets: `PF_API_KEY`, and optional `PF_BASE_URL` + path overrides.\n"
-        "- Fix any 404s by matching the exact API docs for your plan."
-    )
+with st.sidebar.expander("🔌 Punting Form status", expanded=False):
+    if PF_AVAILABLE and pf_is_live():
+        st.success("PF: Live")
+    elif PF_AVAILABLE:
+        st.warning("PF: Client imported, but not live (check API key/secrets).")
+    else:
+        st.error("PF: Client not importable. UI will still work.")
+        if PF_IMPORT_ERROR:
+            st.caption(f"{PF_IMPORT_ERROR}")
 
-# ------------------------------------------------------
-# SIDEBAR: HORSE LIST INPUT (hideable)
-# ------------------------------------------------------
-with st.sidebar.expander("🧾 Horse list", expanded=False):
-    st.caption("Pick the source you want to use (you can save it).")
-    input_mode = st.radio("Input mode", ["Paste", "Upload CSV/Excel", "Use Saved"], horizontal=False)
+# ---------- Sidebar: Data Input ----------
+with st.sidebar.expander("🧾 Horse list", expanded=True):
+    input_mode = st.radio("Source", ["Upload CSV/Excel", "Paste", "Keep current"], index=0)
 
-    pasted = None
-    uploaded_df = None
-
-    if input_mode == "Paste":
-        pasted = st.text_area(
-            "Paste horses (one per line):",
-            height=180,
-            placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\n..."
-        )
-        if st.button("Save pasted list"):
-            names = [n.strip() for n in (pasted or "").splitlines() if n.strip()]
-            df = pd.DataFrame({"Name": names})
-            st.session_state[DATA_KEY] = df
-            st.session_state[DATA_SOURCE_KEY] = "pasted"
-            st.success("Pasted list saved for this session.")
-
-    elif input_mode == "Upload CSV/Excel":
-        sale_file = st.file_uploader("Upload sales file", type=["csv", "xlsx"], key="sale_uploader")
-        if sale_file:
+    new_df = None
+    if input_mode == "Upload CSV/Excel":
+        f = st.file_uploader("Upload", type=["csv","xlsx"])
+        if f:
             try:
-                if sale_file.name.lower().endswith(".xlsx"):
-                    tmp = pd.read_excel(sale_file)
+                if f.name.lower().endswith(".xlsx"):
+                    tmp = pd.read_excel(f)
                 else:
                     try:
-                        tmp = pd.read_csv(sale_file, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
+                        tmp = pd.read_csv(f, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
                     except UnicodeDecodeError:
-                        tmp = pd.read_csv(sale_file, sep=None, engine="python", encoding="ISO-8859-1", on_bad_lines="skip")
+                        tmp = pd.read_csv(f, sep=None, engine="python", encoding="ISO-8859-1", on_bad_lines="skip")
                 tmp = clean_headers(tmp)
-                uploaded_df = tmp.copy()
-                st.success(f"Loaded file with {len(uploaded_df)} rows.")
+                new_df = tmp
+                st.success(f"Loaded {len(new_df)} rows.")
             except Exception as e:
-                st.error(f"Could not read uploaded file: {e}")
-        c1, c2 = st.columns([1,1])
-        with c1:
-            if st.button("Save uploaded file"):
-                if uploaded_df is None:
-                    st.info("Upload a file first.")
-                else:
-                    st.session_state[DATA_KEY] = uploaded_df
-                    st.session_state[DATA_SOURCE_KEY] = "uploaded"
-                    # keep raw bytes for re-use across reruns in cloud
-                    try:
-                        sale_file.seek(0)
-                        st.session_state[SAVED_UPLOAD_BYTES_KEY] = sale_file.read()
-                    except Exception:
-                        pass
-                    st.success("Uploaded data saved for this session.")
-        with c2:
-            if st.button("Clear saved list"):
-                st.session_state[DATA_KEY] = None
-                st.session_state[SAVED_UPLOAD_BYTES_KEY] = None
-                st.session_state[DATA_SOURCE_KEY] = None
-                st.success("Cleared saved list.")
+                st.error(f"Read error: {e}")
+        if st.button("Save data"):
+            if new_df is not None:
+                st.session_state[DATA_KEY] = new_df
+                st.success("Saved. Scroll down to filters and results.")
+            else:
+                st.info("Upload a file first.")
 
-    else:  # Use Saved
+    elif input_mode == "Paste":
+        pasted = st.text_area("One horse per line", height=180, placeholder="Hell Island\nInvincible Phantom\nIrish Bliss")
+        if st.button("Save pasted"):
+            names = [n.strip() for n in pasted.splitlines() if n.strip()]
+            st.session_state[DATA_KEY] = pd.DataFrame({"Name": names})
+            st.success(f"Saved {len(names)} names.")
+
+    else:
         if st.session_state.get(DATA_KEY) is not None:
-            st.success("Using previously saved list.")
+            st.success("Using current data in memory.")
         else:
-            st.info("No saved list yet. Use Paste or Upload, then Save.")
+            st.info("No current data. Upload or paste, then Save.")
 
-# ------------------------------------------------------
-# BUILD sale_df
-# ------------------------------------------------------
-sale_df = st.session_state.get(DATA_KEY)
+# ---------- Build base df ----------
+sale_df = st.session_state.get(DATA_KEY, pd.DataFrame(columns=["Name"])).copy()
+if sale_df.empty:
+    st.info("No data loaded yet. Use **Horse list** in the sidebar to upload/paste and save.")
+else:
+    # let user confirm the Name column
+    guessed = detect_name_col(list(sale_df.columns))
+    current_choice = st.session_state.get(NAME_COL_KEY, guessed if guessed else "Name")
+    st.markdown("#### Name Column")
+    name_col = st.selectbox(
+        "Pick the column that contains the horse name.",
+        options=list(sale_df.columns),
+        index=(list(sale_df.columns).index(current_choice)
+               if current_choice in sale_df.columns else 0),
+        help="This must contain the horse names."
+    )
+    st.session_state[NAME_COL_KEY] = name_col
+    if name_col != "Name":
+        sale_df = sale_df.rename(columns={name_col: "Name"})
 
-# If no saved data and no new upload/paste in this run, still allow paste quick start
-if sale_df is None:
-    # Minimal quick start: allow manual paste in main (hidden by default)
-    st.info("No horses loaded. Open **🧾 Horse list** in the sidebar to paste or upload, then Save.")
-    sale_df = pd.DataFrame(columns=["Name"])
-
-# Clean headers & add helpful derived fields
+# Add/ensure standard columns where possible
 if not sale_df.empty:
-    sale_df = clean_headers(sale_df)
-    # Standardize typical columns if present
-    # (Lot, Age, Sex, Sire, Dam, Vendor, State, Bid, Name)
-    if "Name" not in sale_df.columns:
-        name_col_guess = detect_name_col(list(sale_df.columns))
-        if name_col_guess:
-            sale_df = sale_df.rename(columns={name_col_guess: "Name"})
-    sale_df = derive_lowest_bm_placeholder(sale_df)
+    sale_df = ensure_age_column(sale_df)
+    if "Lowest All Avg Benchmark" not in sale_df.columns:
+        # placeholder so filter UI works; you can add real values in your CSV
+        sale_df["Lowest All Avg Benchmark"] = np.nan
 
-# ------------------------------------------------------
-# FILTERS (multi + Apply)
-# ------------------------------------------------------
-st.sidebar.markdown("---")
-with st.sidebar:
-    st.header("🔎 Filters")
+# ---------- Sidebar: Filters ----------
+with st.sidebar.expander("🔎 Filters", expanded=True):
+    ages = ["Any"] + [str(i) for i in range(1, 11)]
+    sel_age = st.multiselect("Age", options=ages, default=st.session_state[FILTERS_KEY]["age_opts"])
+    sexes = ["Any", "Gelding", "Mare", "Horse", "Colt", "Filly"]
+    sel_sex = st.multiselect("Sex", options=sexes, default=st.session_state[FILTERS_KEY]["sex_opts"])
 
-    # Age multi-select (Any + 1..10)
-    age_options = ["Any"] + [str(i) for i in range(1, 11)]
-    ages = st.multiselect(
-        "Age",
-        options=age_options,
-        default=st.session_state[FILTERS_KEY]["ages"]
-    )
+    state_options = sorted(sale_df["State"].dropna().astype(str).unique().tolist()) if "State" in sale_df.columns else []
+    sel_state = st.multiselect("State", options=state_options, default=st.session_state[FILTERS_KEY]["state_opts"])
 
-    # Sex multi
-    sex_options = ["Any", "Gelding", "Mare", "Horse", "Colt", "Filly"]
-    sexes = st.multiselect(
-        "Sex",
-        options=sex_options,
-        default=st.session_state[FILTERS_KEY]["sexes"]
-    )
+    maiden = st.selectbox("Maiden", ["Any", "Yes", "No"], index=["Any","Yes","No"].index(st.session_state[FILTERS_KEY]["maiden"]))
 
-    # State multi (only show if present in data)
-    state_opts = []
-    if "State" in sale_df.columns:
-        state_opts = sorted(
-            list({s for s in sale_df["State"].dropna().astype(str).str.strip().tolist() if s})
-        )
-    states = st.multiselect("State", options=state_opts, default=st.session_state[FILTERS_KEY]["states"])
+    bm_max = st.text_input("Lowest achieved All Avg Benchmark (max)", value=str(st.session_state[FILTERS_KEY]["bm_max"]) if st.session_state[FILTERS_KEY]["bm_max"] is not None else "")
 
-    maiden = st.selectbox("Maiden", ["Any", "Yes", "No"], index=["Any", "Yes", "No"].index(
-        st.session_state[FILTERS_KEY]["maiden"]
-    ))
-
-    bm_max = st.number_input("Lowest achieved All Avg Benchmark (max)", value=0.0, step=0.1, help="Filters horses whose *lowest achieved* All Avg Benchmark is ≤ value. (Uses PF data if available, fallback to a placeholder if not.)")
-    bm_use = bm_max
-
-    if st.button("✅ Apply Filters"):
-        st.session_state[FILTERS_KEY]["ages"] = ages if ages else ["Any"]
-        st.session_state[FILTERS_KEY]["sexes"] = sexes if sexes else ["Any"]
-        st.session_state[FILTERS_KEY]["states"] = states
+    if st.button("✅ Apply"):
+        st.session_state[FILTERS_KEY]["age_opts"] = sel_age if sel_age else ["Any"]
+        st.session_state[FILTERS_KEY]["sex_opts"] = sel_sex if sel_sex else ["Any"]
+        st.session_state[FILTERS_KEY]["state_opts"] = sel_state
         st.session_state[FILTERS_KEY]["maiden"] = maiden
-        st.session_state[FILTERS_KEY]["lowest_all_avg_bm_max"] = bm_use
-        st.session_state[FILTERS_KEY]["apply_clicked"] = True
+        st.session_state[FILTERS_KEY]["bm_max"] = (coerce_float(bm_max) if bm_max.strip() != "" else None)
+        st.session_state[FILTERS_KEY]["applied"] = True
 
-# ------------------------------------------------------
-# APPLY FILTERS
-# ------------------------------------------------------
-def normalize_age_col(df: pd.DataFrame) -> pd.DataFrame:
-    if "Age" not in df.columns:
-        # Try Year of Birth -> age
-        if "yob" in df.columns:
-            df["Age"] = date.today().year - pd.to_numeric(df["yob"], errors="coerce")
-        else:
-            df["Age"] = np.nan
-    return df
-
+# ---------- Apply filters ----------
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     f = df.copy()
-    f = normalize_age_col(f)
 
-    # Age filter
-    chosen_ages = st.session_state[FILTERS_KEY]["ages"]
-    if "Any" not in chosen_ages:
-        # ensure df age as string to compare multi
-        f = f[f["Age"].astype(str).isin(chosen_ages)]
+    # age
+    age_sel = st.session_state[FILTERS_KEY]["age_opts"]
+    if "Any" not in age_sel:
+        f = f[f["Age"].astype(str).isin(age_sel)]
 
-    # Sex filter
-    chosen_sexes = st.session_state[FILTERS_KEY]["sexes"]
-    if "Any" not in chosen_sexes and "Sex" in f.columns:
-        f = f[f["Sex"].astype(str).str.capitalize().isin([s.capitalize() for s in chosen_sexes])]
+    # sex
+    sex_sel = st.session_state[FILTERS_KEY]["sex_opts"]
+    if "Any" not in sex_sel and "Sex" in f.columns:
+        f = f[f["Sex"].astype(str).str.capitalize().isin([s.capitalize() for s in sex_sel])]
 
-    # Maiden
-    maiden_sel = st.session_state[FILTERS_KEY]["maiden"]
-    if maiden_sel != "Any":
-        # if we have a Maiden boolean or text
-        if "Maiden" in f.columns:
-            if maiden_sel == "Yes":
-                # Accept typical strings: "Yes", True, "True", "Y"
-                mask = f["Maiden"].astype(str).str.strip().str.lower().isin(["yes", "y", "true", "1"])
-            else:
-                mask = f["Maiden"].astype(str).str.strip().str.lower().isin(["no", "n", "false", "0"])
-            f = f[mask]
+    # state
+    st_sel = st.session_state[FILTERS_KEY]["state_opts"]
+    if st_sel and "State" in f.columns:
+        f = f[f["State"].astype(str).isin(st_sel)]
 
-    # State
-    chosen_states = st.session_state[FILTERS_KEY]["states"]
-    if chosen_states and "State" in f.columns:
-        f = f[f["State"].astype(str).isin(chosen_states)]
+    # maiden
+    msel = st.session_state[FILTERS_KEY]["maiden"]
+    if msel != "Any" and "Maiden" in f.columns:
+        # interpret typical truthy/falsey strings
+        truthy = ["yes","y","true","1"]
+        falsy = ["no","n","false","0"]
+        col = f["Maiden"].astype(str).str.strip().str.lower()
+        if msel == "Yes":
+            f = f[col.isin(truthy)]
+        else:
+            f = f[col.isin(falsy)]
 
-    # Lowest achieved All Avg Benchmark (max)
-    bm_cut = st.session_state[FILTERS_KEY]["lowest_all_avg_bm_max"]
-    if bm_cut is not None and "Lowest All Avg Benchmark" in f.columns:
-        with pd.option_context('mode.use_inf_as_na', True):
-            f = f[pd.to_numeric(f["Lowest All Avg Benchmark"], errors="coerce") <= bm_cut]
+    # bm max
+    bm = st.session_state[FILTERS_KEY]["bm_max"]
+    if bm is not None and "Lowest All Avg Benchmark" in f.columns:
+        f = f[pd.to_numeric(f["Lowest All Avg Benchmark"], errors="coerce") <= float(bm)]
 
     return f
 
-filtered_df = apply_filters(sale_df) if st.session_state[FILTERS_KEY]["apply_clicked"] else sale_df.copy()
+filtered_df = apply_filters(sale_df) if st.session_state[FILTERS_KEY]["applied"] else sale_df
 
-# ------------------------------------------------------
-# MAIN LAYOUT
-# ------------------------------------------------------
-left, right = st.columns([1, 1])
+# ---------- Layout ----------
+left, right = st.columns([1,1])
 
 with left:
     st.subheader("📋 Filtered Sale Horses")
-    if filtered_df.empty or "Name" not in filtered_df.columns:
-        st.info("No rows to show. Make sure you have a **Name** column and applied filters.")
+    if filtered_df.empty:
+        st.info("No rows to show. Adjust filters or load data.")
     else:
-        # augment with helper columns
-        view_df = filtered_df.copy()
-        # Has Won?
-        if "Wins" in view_df.columns:
-            try:
-                view_df["Has Won?"] = view_df["Wins"].apply(lambda x: int(str(x).split(".")[0]) > 0 if pd.notnull(x) else None)
-            except Exception:
-                view_df["Has Won?"] = None
-        elif "wins" in view_df.columns:
-            try:
-                view_df["Has Won?"] = view_df["wins"].apply(lambda x: int(str(x).split(".")[0]) > 0 if pd.notnull(x) else None)
-            except Exception:
-                view_df["Has Won?"] = None
-        else:
-            view_df["Has Won?"] = None
+        # Attach a "Has Won?" column if Wins exists
+        view = filtered_df.copy()
+        if "Wins" in view.columns:
+            def _has_won(val):
+                try:
+                    return int(str(val).split(".")[0]) > 0
+                except Exception:
+                    return None
+            view["Has Won?"] = view["Wins"].apply(_has_won)
+        show_cols = [c for c in ["Lot","Name","Age","Sex","State","Bid","Wins","Has Won?","Lowest All Avg Benchmark"] if c in view.columns]
+        st.dataframe(view[show_cols].reset_index(drop=True), use_container_width=True)
 
-        # present
-        show_cols = [c for c in ["Lot", "Name", "Age", "Sex", "State", "Bid", "Lowest All Avg Benchmark", "Wins", "Has Won?"] if c in view_df.columns]
-        st.dataframe(view_df[show_cols].reset_index(drop=True), use_container_width=True)
-
-        # Select → top "Selected Horse"
-        selected_name = st.selectbox(
-            "Select a horse to view:",
-            sorted(view_df["Name"].dropna().astype(str).unique())
+        selected = st.selectbox(
+            "Select a horse to view",
+            options=sorted(view["Name"].dropna().astype(str).unique())
         )
-        if selected_name:
-            st.session_state[SELECTED_HORSE_KEY] = selected_name
+        if selected:
+            st.session_state[SELECTED_HORSE_KEY] = selected
 
-        # Save shortlist button (append current filtered list)
-        col_sl1, col_sl2 = st.columns([1,1])
-        with col_sl1:
+        # shortlist controls
+        c1, c2 = st.columns(2)
+        with c1:
             if st.button("➕ Add filtered to shortlist"):
-                add_names = view_df["Name"].dropna().astype(str).tolist()
-                # keep unique, preserve existing
-                current = st.session_state[SHORTLIST_KEY]
-                st.session_state[SHORTLIST_KEY] = list(dict.fromkeys(current + add_names))
-                st.success(f"Added {len(add_names)} horses to shortlist.")
-        with col_sl2:
+                add = view["Name"].dropna().astype(str).tolist()
+                sl = st.session_state[SHORTLIST_KEY]
+                st.session_state[SHORTLIST_KEY] = list(dict.fromkeys(sl + add))
+                st.success(f"Added {len(add)} names to shortlist.")
+        with c2:
             if st.button("⬇️ Download shortlist CSV"):
-                sd = pd.DataFrame({"Name": st.session_state[SHORTLIST_KEY]})
-                st.download_button(
-                    "Download now",
-                    data=sd.to_csv(index=False),
-                    file_name="shortlist.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
+                out = pd.DataFrame({"Name": st.session_state[SHORTLIST_KEY]})
+                st.download_button("Download now", data=out.to_csv(index=False), file_name="shortlist.csv", mime="text/csv")
 
 with right:
     st.subheader("🎯 Selected Horse")
-    selected_horse = st.session_state.get(SELECTED_HORSE_KEY)
-
-    if not selected_horse:
-        st.info("Pick a horse from the left table to view details.")
+    selected = st.session_state.get(SELECTED_HORSE_KEY)
+    if not selected:
+        st.info("Pick a horse on the left.")
     else:
-        # Matching row if available
-        row = filtered_df[filtered_df["Name"].astype(str) == str(selected_horse)]
+        # find detail row (prefer filtered; fallback to base)
+        row = filtered_df[filtered_df["Name"].astype(str) == str(selected)]
         if row.empty:
-            row = sale_df[sale_df["Name"].astype(str) == str(selected_horse)]
-        detail = row.iloc[0].to_dict() if not row.empty else {"Name": selected_horse}
+            row = sale_df[sale_df["Name"].astype(str) == str(selected)]
+        d = row.iloc[0].to_dict() if not row.empty else {"Name": selected}
 
-        # Show useful details from the sale list
-        st.markdown(f"### {detail.get('Name', selected_horse)}")
-        cols_info = [("Lot","Lot"),("Age","Age"),("Sex","Sex"),("Sire","Sire"),("Dam","Dam"),
-                     ("Vendor","Vendor"),("State","State"),("Bid","Bid"),
-                     ("Lowest All Avg Benchmark","Lowest All Avg Benchmark")]
-        info_pairs = []
-        for label, key in cols_info:
-            if key in detail and pd.notnull(detail[key]) and str(detail[key]).strip():
-                info_pairs.append((label, detail[key]))
-        if info_pairs:
-            st.table(pd.DataFrame(info_pairs, columns=["Field","Value"]))
+        st.markdown(f"### {d.get('Name', selected)}")
+        pairs = []
+        for label in ["Lot","Age","Sex","Sire","Dam","Vendor","State","Bid","Wins","Lowest All Avg Benchmark"]:
+            if label in d and pd.notnull(d[label]) and str(d[label]).strip():
+                pairs.append((label, d[label]))
+        if pairs:
+            st.table(pd.DataFrame(pairs, columns=["Field","Value"]))
 
-        # PF button ON TOP (as requested)
+        # ---- PF panel (button + connectivity tester) ----
         st.markdown("#### 📡 Punting Form")
-        with st.container():
-            btn_cols = st.columns([1,1,1])
-            with btn_cols[0]:
-                get_pf = st.button("🔍 View Punting Form Data", use_container_width=True)
-            with btn_cols[1]:
-                st.session_state[EMBED_PF_PANEL_OPEN_KEY] = st.toggle("Show embedded PF panel", value=st.session_state[EMBED_PF_PANEL_OPEN_KEY])
-            with btn_cols[2]:
-                pass
+        col_a, col_b = st.columns([1,1])
+        with col_a:
+            if st.button("🔍 View Punting Form Data"):
+                if not PF_AVAILABLE:
+                    st.error("pf_client not importable. Add pf_client.py & secrets.")
+                else:
+                    try:
+                        res = search_horse_by_name(selected)
+                        st.json(res)
+                    except Exception as e:
+                        st.error(f"PF search failed: {e}")
 
-        # When clicked, fetch basic PF hooks
-        if get_pf:
-            with st.spinner("Searching Punting Form…"):
-                try:
-                    ident = pf_search_horse_by_name(selected_horse)
-                    if not ident.get("found"):
-                        st.warning("Horse not found in PF (or pf_client in Demo Mode).")
+        with col_b:
+            with st.expander("Connectivity test (direct API)", expanded=False):
+                st.caption("Use this to verify your **API key & endpoint** are correct.")
+                endpoint = st.selectbox(
+                    "Endpoint",
+                    ["Ratings/MeetingBenchmarks", "Ratings/MeetingSectionals", "Ratings/MeetingRatings"],
+                    index=0
+                )
+                meeting_id = st.text_input("meetingId (int)", value="")
+                if st.button("Test call"):
+                    if not PF_AVAILABLE:
+                        st.error("pf_client not importable.")
+                    elif not meeting_id.strip().isdigit():
+                        st.warning("Enter a numeric meetingId.")
                     else:
-                        st.success(f"Found on PF: {ident.get('display_name', selected_horse)} (id: {ident.get('horse_id')})")
+                        try:
+                            path = f"/{endpoint}"
+                            r = pf_raw_get(path, params={"meetingId": int(meeting_id)})
+                            st.write(f"HTTP {r.status_code}")
+                            if r.headers.get("content-type","").startswith("application/json"):
+                                st.json(r.json())
+                            else:
+                                st.text(r.text)
+                        except Exception as e:
+                            st.error(f"Test failed: {e}")
 
-                        # If you had meeting/race ids, fetch more:
-                        # form = pf_get_form(ident["horse_id"])
-                        # ratings = pf_get_ratings(<meeting_id>)
-                        # sectionals = pf_get_meeting_sectionals(<meeting_id>)
-                        # benchmarks = pf_get_meeting_benchmarks(<meeting_id>)
-                        # Here we just show the search result for now:
-                        with st.expander("🔎 PF Search Result", expanded=True):
-                            st.json(ident)
-                except Exception as e:
-                    st.error(f"Could not retrieve data: {e}")
-
-        # Embedded PF page (if they want to see the real PF page right inside)
-        if st.session_state[EMBED_PF_PANEL_OPEN_KEY]:
-            st.markdown("##### 🌐 Embedded Punting Form Page")
-            st.caption(
-                "Paste a Punting Form page URL here (e.g., horse profile or meeting page). "
-                "Note: some sites block embedding; if the frame fails, click the external link."
-            )
-            pf_url = st.text_input("PF Page URL", value="", placeholder="https://api.puntingform.com.au/...")
-            if pf_url:
-                # Show an external link
-                st.markdown(f"[Open in new tab]({pf_url})")
-                # Try to embed
-                st.components.v1.iframe(pf_url, height=680, scrolling=True)
-
-# ------------------------------------------------------
-# QUALITY-OF-LIFE: QUICK STATS + HOW-TO
-# ------------------------------------------------------
 st.markdown("---")
-with st.expander("📊 Quick Summary & How to Make This Powerful", expanded=False):
-    total = len(sale_df) if not sale_df.empty else 0
-    filtered_n = len(filtered_df) if not filtered_df.empty else 0
-    shortlist_n = len(st.session_state[SHORTLIST_KEY])
-    st.write(f"**Loaded horses:** {total} | **Filtered:** {filtered_n} | **In shortlist:** {shortlist_n}")
-
-    st.markdown(
-        """
-**Tips to go next-level:**
-- Add a **Meeting/Race mapping** to your sale list (columns `MeetingId`, `RaceId`), then call:
-  - `pf_get_ratings(meeting_id)`, `pf_get_meeting_sectionals(meeting_id)`, `pf_get_meeting_benchmarks(meeting_id)`.
-- Use Punting Form's "lowest achieved All Avg Benchmark" into your dataset. Put it in a column named **`Lowest All Avg Benchmark`**, and the filter here will be exact.
-- Make your own **scoring** column (e.g. *ModelScore*) and add a sort control to surface best value quickly.
-- Use the **shortlist** to export a CSV and share with partners/investors.
-"""
-    )
-
-# ------------------------------------------------------
-# FOOTER
-# ------------------------------------------------------
 st.caption("© Soar Bloodstock — MoneyBall")
