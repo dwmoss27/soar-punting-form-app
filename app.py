@@ -17,11 +17,50 @@ except Exception:
 
 # Optional embed support
 import streamlit.components.v1 as components
+# ---- pf_client import guard (keep at TOP of app.py) ----
+import os, sys, traceback
+import streamlit as st
+
+# Ensure current directory is on path (helps some cloud runners)
+if os.path.dirname(__file__) not in sys.path:
+    sys.path.append(os.path.dirname(__file__))
+
+def _diagnose_missing_pf_client(e):
+    st.error("❌ Couldn't import `pf_client`. See details below.")
+    st.caption("What I can see in your app folder:")
+    try:
+        st.code("\n".join(sorted(os.listdir("."))))
+    except Exception:
+        st.code("(could not list directory)")
+
+    st.caption("Import error:")
+    st.code("".join(traceback.format_exception_only(type(e), e)))
+    st.stop()
+
+try:
+    # try a cheap probe before the real import
+    if not os.path.exists(os.path.join(os.path.dirname(__file__), "pf_client.py")):
+        raise ImportError("pf_client.py is missing next to app.py")
+except Exception as _e:
+    _diagnose_missing_pf_client(_e)
+# ---- end guard ----
+from pf_client import (
+    is_live,
+    search_horse_by_name,
+    get_form,
+    get_ratings,
+    get_meeting_sectionals,
+    get_meeting_benchmarks,
+    get_results,
+    get_strike_rate,
+    get_southcoast_export,
+)
 
 # ------------ Punting Form client (must exist in repo) ------------
 # Your pf_client must read Streamlit secrets for BASE_URL/paths/API key.
 # It should expose: is_live, search_horse_by_name, get_form, get_ratings,
 # get_speedmap, get_sectionals_csv, get_benchmarks_csv
+
 from pf_client import (
     is_live, search_horse_by_name, get_form,
     get_ratings, get_speedmap, get_sectionals_csv, get_benchmarks_csv
