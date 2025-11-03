@@ -1,11 +1,18 @@
+# --- Core Streamlit app ---
 streamlit==1.38.0
 pandas==2.2.2
-requests>=2.31.0
-openpyxl>=3.1.2
-rapidfuzz==3.9.7
-beautifulsoup4>=4.12.3
-lxml>=5.2.2
-Pillow==10.4.0
-pillow>=10.0.0
-openpyxl
+numpy==1.26.4
 
+# --- File and image handling ---
+pillow>=10.0.0        # for image/logo rendering
+openpyxl>=3.1.3       # for Excel (xlsx) uploads
+requests>=2.31.0      # for API calls (Punting Form)
+python-dateutil>=2.9  # date utilities
+
+# --- Optional but helpful for stability ---
+chardet>=5.2.0        # encoding fallback for CSVs
+fuzzywuzzy==0.18.0    # for name matching (if used in pf_client)
+python-Levenshtein>=0.25.0  # speeds up fuzzywuzzy
+
+# --- Data visualization (optional but safe to include) ---
+matplotlib>=3.9.0
