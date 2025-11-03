@@ -1,24 +1,7 @@
-# Core Streamlit app
 streamlit==1.38.0
-
-# Data handling
 pandas==2.2.2
 numpy==1.26.4
 openpyxl==3.1.5
-
-# Image handling (for logo uploads / previews)
 Pillow==10.4.0
-
-# API and HTTP requests
 requests==2.32.3
 
-# Optional stability & utilities
-python-dateutil==2.9.0.post0
-chardet==5.2.0
-
-# (Optional) For fuzzy name matching or extended features
-fuzzywuzzy==0.18.0
-python-Levenshtein==0.25.1
-
-# (Optional) If you ever add charts
-matplotlib==3.9.2
