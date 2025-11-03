@@ -1,4 +1,4 @@
-# app.py — Soar Bloodstock Data - MoneyBall (Final Stable Version)
+# app.py — Soar Bloodstock Data - MoneyBall (Robust Logo Fix)
 import io
 import re
 from datetime import date
@@ -6,6 +6,13 @@ from typing import Optional
 
 import streamlit as st
 import pandas as pd
+
+# Optional PIL import for safer image rendering (we fall back only if needed)
+try:
+    from PIL import Image  # pillow must be in requirements
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
 
 # ---- Punting Form client (pf_client.py must be in repo) ----
 from pf_client import (
@@ -22,8 +29,6 @@ SALE_BYTES_KEY     = "sale_uploaded_bytes"
 SALE_NAME_KEY      = "sale_uploaded_name"
 LOGO_BYTES_KEY     = "logo_bytes"
 FILTERS_KEY        = "filters"
-HIDE_INPUTS_KEY    = "hide_inputs"
-SELECTED_HORSE_KEY = "selected_name"
 
 # Defaults
 st.session_state.setdefault(FILTERS_KEY, {
@@ -34,7 +39,7 @@ st.session_state.setdefault(FILTERS_KEY, {
     "lowest_bm_max": 5.0,
     "state_selected": []
 })
-st.session_state.setdefault(HIDE_INPUTS_KEY, False)
+
 LIVE = is_live()
 
 # ──────────────────────────────────────────────────────────────
@@ -97,15 +102,34 @@ def show_kv(label, value):
     if value is not None and str(value).strip():
         st.write(f"**{label}:**", value)
 
+def render_logo_center():
+    """Render saved logo safely in the center column. Clears bad data if crashes."""
+    logo_data = st.session_state.get(LOGO_BYTES_KEY, None)
+    if not logo_data:
+        return
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        try:
+            # Prefer BytesIO wrapper for Streamlit Cloud robustness
+            st.image(io.BytesIO(logo_data), use_container_width=False)
+        except Exception:
+            # Try PIL as a fallback if available
+            if PIL_AVAILABLE:
+                try:
+                    img = Image.open(io.BytesIO(logo_data))
+                    st.image(img, use_container_width=False)
+                except Exception:
+                    st.warning("⚠️ Logo could not be displayed and has been cleared. Please re-upload under Settings.")
+                    st.session_state.pop(LOGO_BYTES_KEY, None)
+            else:
+                st.warning("⚠️ Logo could not be displayed and has been cleared. Please re-upload under Settings.")
+                st.session_state.pop(LOGO_BYTES_KEY, None)
+
 # ──────────────────────────────────────────────────────────────
 # Title + (optional) centered logo (from Settings tab)
 # ──────────────────────────────────────────────────────────────
-col1, col2, col3 = st.columns([1, 2, 1])
-with col2:
-    logo_data = st.session_state.get(LOGO_BYTES_KEY, None)
-    if isinstance(logo_data, (bytes, bytearray)) and len(logo_data) > 0:
-        st.image(logo_data, use_container_width=False)
-    st.title("Soar Bloodstock Data - MoneyBall")
+render_logo_center()
+st.title("Soar Bloodstock Data - MoneyBall")
 
 # ──────────────────────────────────────────────────────────────
 # Tabs: App  |  Settings
@@ -188,16 +212,28 @@ with tab_app:
         st.error("No ‘Name’ column found. Provide data correctly.")
         st.stop()
 
+    # ── Filters
     st.subheader("Filters")
     ages_all = list(range(1, 11))
-    age_any = st.checkbox("Any age", value=st.session_state[FILTERS_KEY]["age_any"])
-    age_selected = st.multiselect("Ages", ages_all, default=st.session_state[FILTERS_KEY]["age_selected"], disabled=age_any)
+    fs_prev = st.session_state[FILTERS_KEY]
+
+    age_any = st.checkbox("Any age", value=fs_prev["age_any"])
+    age_default = [a for a in fs_prev["age_selected"] if a in ages_all]
+    age_selected = st.multiselect("Ages", ages_all, default=age_default, disabled=age_any)
+
     sex_options = ["Gelding", "Mare", "Horse", "Colt", "Filly"]
-    sex_selected = st.multiselect("Sex", sex_options, default=st.session_state[FILTERS_KEY]["sex_selected"])
-    maiden_choice = st.selectbox("Maiden", ["Any", "Yes", "No"], index=["Any","Yes","No"].index(st.session_state[FILTERS_KEY]["maiden_choice"]))
-    lowest_bm_max = st.number_input("Lowest achieved All Avg Benchmark ≤", value=float(st.session_state[FILTERS_KEY]["lowest_bm_max"]), step=0.1)
+    sex_default = [s for s in fs_prev["sex_selected"] if s in sex_options]
+    sex_selected = st.multiselect("Sex", sex_options, default=sex_default)
+
+    maiden_choice = st.selectbox("Maiden", ["Any", "Yes", "No"],
+                                 index=["Any","Yes","No"].index(fs_prev["maiden_choice"]))
+
+    lowest_bm_max = st.number_input("Lowest achieved All Avg Benchmark ≤",
+                                    value=float(fs_prev["lowest_bm_max"]), step=0.1)
+
     state_options = sorted([s for s in sale_df["State"].dropna().astype(str).unique()]) if "State" in sale_df.columns else []
-    state_selected = st.multiselect("State", state_options, default=[s for s in st.session_state[FILTERS_KEY]["state_selected"] if s in state_options])
+    state_default = [s for s in fs_prev["state_selected"] if s in state_options]
+    state_selected = st.multiselect("State (choose one or more)", state_options, default=state_default)
 
     if st.button("Apply filters"):
         st.session_state[FILTERS_KEY] = {
@@ -218,9 +254,12 @@ with tab_app:
         f"Lowest BM≤{fs['lowest_bm_max']} | State={fs['state_selected'] or '—'}"
     )
 
-    st.subheader("Filtered sale horses")
+    # (You can implement filter logic here when you have BM data joined)
     filtered_df = sale_df
+
+    st.subheader("Filtered sale horses")
     if not filtered_df.empty:
+        # clicking a row won't select, but we let the user pick below
         st.dataframe(filtered_df, use_container_width=True)
         st.download_button(
             "⬇️ Export shortlist (CSV)",
@@ -228,11 +267,18 @@ with tab_app:
             file_name="shortlist.csv",
             mime="text/csv",
         )
+    else:
+        st.info("No horses to display yet. Paste or upload first.")
 
     all_names = sorted(sale_df[name_col].dropna().astype(str).unique())
-    selected_name = st.selectbox("Selected horse", options=["—"] + all_names)
+    st.markdown("---")
+    st.subheader("Selected horse")
+
+    selected_name = st.selectbox("Pick a horse", options=["—"] + all_names)
     if selected_name and selected_name != "—":
-        st.write(f"### Selected Horse: {selected_name}")
+        st.write(f"### {selected_name}")
+
+        # Make the PF button visible right under the selected horse header
         if st.button("🔎 View Punting Form Data"):
             with st.spinner(f"Searching Punting Form for “{selected_name}”…"):
                 try:
@@ -242,9 +288,11 @@ with tab_app:
                     else:
                         st.success(f"Found: {ident.get('display_name', selected_name)}")
                         horse_id = ident.get("horse_id") or ident.get("id")
+                        # If your PF API expects meeting/race ids, adapt these calls accordingly
                         form = get_form(horse_id)
                         ratings = get_ratings(horse_id)
                         speedmap = get_speedmap(horse_id)
+
                         tabs = st.tabs(["Form", "Ratings", "Speedmap"])
                         with tabs[0]: st.json(form)
                         with tabs[1]: st.json(ratings)
