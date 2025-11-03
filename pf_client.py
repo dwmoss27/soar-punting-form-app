@@ -1,151 +1,119 @@
+# pf_client.py — Soar Bloodstock full Punting Form API client (v2)
+# Supports: Form, Ratings, Benchmarks, Sectionals, Results, StrikeRate, SouthCoast Export
+
 import os
 import requests
+import streamlit as st
 
-# Try Streamlit secrets; fall back to env vars
-try:
-    import streamlit as st
-    SECRETS = st.secrets
-except Exception:
-    SECRETS = {}
+# -------------------------------------------------------------
+# Configuration from secrets
+# -------------------------------------------------------------
+PF_BASE_URL = st.secrets.get("PF_BASE_URL", "https://api.puntingform.com.au/v2")
+PF_API_KEY = st.secrets.get("PF_API_KEY", None)
 
-def _get(key, default=None):
-    if key in SECRETS:
-        return SECRETS[key]
-    return os.environ.get(key, default)
+# Fallbacks for path configs
+PF_PATH_SEARCH = st.secrets.get("PF_PATH_SEARCH", "/Horses")
+PF_PATH_FORM = st.secrets.get("PF_PATH_FORM", "/form")
+PF_PATH_RATINGS = st.secrets.get("PF_PATH_RATINGS", "/Ratings")
+PF_PATH_SECTIONALS = st.secrets.get("PF_PATH_SECTIONALS", "/Ratings/MeetingSectionals")
+PF_PATH_BENCHMARKS = st.secrets.get("PF_PATH_BENCHMARKS", "/Ratings/MeetingBenchmarks")
+PF_PATH_RESULTS = st.secrets.get("PF_PATH_RESULTS", "/form/results")
+PF_PATH_STRIKERATE = st.secrets.get("PF_PATH_STRIKERATE", "/form/strikerate")
+PF_PATH_EXPORT = st.secrets.get("PF_PATH_EXPORT", "/Ratings/SouthCoastExport")
 
-PF_BASE_URL    = _get("PF_BASE_URL", "").rstrip("/")
-PF_API_KEY     = _get("PF_API_KEY", "")
-PF_AUTH_HEADER = _get("PF_AUTH_HEADER", "x-api-key")   # or "Authorization"
-PF_AUTH_PREFIX = _get("PF_AUTH_PREFIX", "")            # "", "Bearer ", "Token ", etc.
-
-# Optional: allow path overrides via secrets
-PF_PATH_SEARCH      = _get("PF_PATH_SEARCH",      "")
-PF_PATH_FORM        = _get("PF_PATH_FORM",        "")
-PF_PATH_RATINGS     = _get("PF_PATH_RATINGS",     "")
-PF_PATH_SPEEDMAP    = _get("PF_PATH_SPEEDMAP",    "")
-PF_PATH_SECTIONALS  = _get("PF_PATH_SECTIONALS",  "")
-PF_PATH_BENCHMARKS  = _get("PF_PATH_BENCHMARKS",  "")
-
-def _headers():
-    if not PF_API_KEY:
-        return {"Accept": "application/json"}
-    token = f"{PF_AUTH_PREFIX}{PF_API_KEY}" if PF_AUTH_PREFIX else PF_API_KEY
-    return {PF_AUTH_HEADER: token, "Accept": "application/json"}
-
-def _url(path: str) -> str:
-    if not PF_BASE_URL:
-        raise RuntimeError("PF_BASE_URL not set.")
+# -------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------
+def _full_url(path: str) -> str:
     if not path.startswith("/"):
         path = "/" + path
-    return PF_BASE_URL + path
+    return PF_BASE_URL.rstrip("/") + path
+
+def _headers() -> dict:
+    headers = {"accept": "application/json"}
+    if PF_API_KEY:
+        headers["Authorization"] = f"Bearer {PF_API_KEY}"
+    return headers
 
 def is_live() -> bool:
-    return bool(PF_BASE_URL and PF_API_KEY)
+    return bool(PF_API_KEY and PF_API_KEY.strip())
 
-def _raise_for_auth(r: requests.Response):
-    if r.status_code == 401:
-        raise RuntimeError("Unauthorized (401): Check PF_API_KEY or auth header/prefix.")
-    if r.status_code == 403:
-        raise RuntimeError("Forbidden (403): Key valid, but your plan lacks this endpoint.")
+# -------------------------------------------------------------
+# Core API functions
+# -------------------------------------------------------------
+def search_horse_by_name(name: str):
+    """Search for horse by name (adjust path per PF subscription)."""
+    url = _full_url(PF_PATH_SEARCH)
+    params = {"query": name, "apiKey": PF_API_KEY}
+    r = requests.get(url, headers=_headers(), params=params, timeout=15)
+    if r.status_code == 404:
+        raise ValueError("❌ Search endpoint not found (404). Check PF_PATH_SEARCH in secrets.")
+    r.raise_for_status()
+    return r.json()
 
-def _safe_json(r: requests.Response):
+def get_form(horse_id: int):
+    url = _full_url(f"{PF_PATH_FORM}/{horse_id}")
+    params = {"apiKey": PF_API_KEY}
+    r = requests.get(url, headers=_headers(), params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def get_ratings(meeting_id: int):
+    """Returns Meeting Ratings (ratings by race/meeting)."""
+    url = _full_url(PF_PATH_RATINGS + "/MeetingRatings")
+    params = {"meetingId": meeting_id, "apiKey": PF_API_KEY}
+    r = requests.get(url, headers=_headers(), params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def get_meeting_sectionals(meeting_id: int):
+    """Returns sectionals for a given meeting."""
+    url = _full_url(PF_PATH_SECTIONALS)
+    params = {"meetingId": meeting_id, "apiKey": PF_API_KEY}
+    r = requests.get(url, headers=_headers(), params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def get_meeting_benchmarks(meeting_id: int):
+    """Returns benchmark data for a given meeting."""
+    url = _full_url(PF_PATH_BENCHMARKS)
+    params = {"meetingId": meeting_id, "apiKey": PF_API_KEY}
+    r = requests.get(url, headers=_headers(), params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def get_results():
+    """Returns all available results."""
+    url = _full_url(PF_PATH_RESULTS)
+    params = {"apiKey": PF_API_KEY}
+    r = requests.get(url, headers=_headers(), params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def get_strike_rate():
+    """Returns strike rate data."""
+    url = _full_url(PF_PATH_STRIKERATE)
+    params = {"apiKey": PF_API_KEY}
+    r = requests.get(url, headers=_headers(), params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def get_southcoast_export(meeting_id: int):
+    """Exports SouthCoast data for modellers."""
+    url = _full_url(PF_PATH_EXPORT)
+    params = {"meetingId": meeting_id, "apiKey": PF_API_KEY}
+    r = requests.get(url, headers=_headers(), params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+# -------------------------------------------------------------
+# Test connection
+# -------------------------------------------------------------
+def test_connection():
     try:
-        return r.json()
-    except Exception:
-        return {}
-
-def _first_ok_get(candidates):
-    for path, params in candidates:
-        try:
-            r = requests.get(_url(path), headers=_headers(), params=params, timeout=25)
-            if r.status_code == 200:
-                return r
-            _raise_for_auth(r)
-            if r.status_code in (204,):
-                return r
-        except requests.RequestException:
-            pass
-    return None
-
-def _extract_horse_hit(payload, typed_name: str) -> dict:
-    if isinstance(payload, list) and payload:
-        hit = payload[0]
-    elif isinstance(payload, dict) and payload:
-        hit = payload
-    else:
-        return {"display_name": typed_name, "found": False}
-
-    hit.setdefault("display_name", hit.get("name", typed_name))
-    if "horse_id" not in hit:
-        for k in ("id", "horseId", "HorseId", "horse_id"):
-            if k in hit:
-                hit["horse_id"] = hit[k]
-                break
-    hit.setdefault("found", True)
-    return hit
-
-def search_horse_by_name(name: str) -> dict:
-    if not PF_BASE_URL:
-        raise RuntimeError("PF_BASE_URL not set.")
-
-    if PF_PATH_SEARCH:
-        r = _first_ok_get([
-            (PF_PATH_SEARCH, {"q": name}),
-            (PF_PATH_SEARCH, {"name": name}),
-            (PF_PATH_SEARCH, {"query": name}),
-        ])
-        if r is not None:
-            _raise_for_auth(r)
-            r.raise_for_status()
-            return _extract_horse_hit(_safe_json(r), name)
-
-    guesses = [
-        ("/horses/search", {"q": name}),
-        ("/horses/search", {"name": name}),
-        ("/search/horses", {"q": name}),
-        ("/search/horses", {"name": name}),
-        ("/horses", {"q": name}),
-        ("/horses", {"name": name}),
-        ("/search", {"q": name}),
-    ]
-    r = _first_ok_get(guesses)
-    if r is None:
-        raise RuntimeError("Search endpoint not found (404). Set PF_PATH_SEARCH in secrets to the correct path.")
-    _raise_for_auth(r)
-    r.raise_for_status()
-    return _extract_horse_hit(_safe_json(r), name)
-
-def get_form(horse_id):
-    path = PF_PATH_FORM or "/horses/{horse_id}/form"
-    r = requests.get(_url(path.format(horse_id=horse_id)), headers=_headers(), timeout=30)
-    _raise_for_auth(r)
-    r.raise_for_status()
-    return _safe_json(r)
-
-def get_ratings(horse_id):
-    path = PF_PATH_RATINGS or "/horses/{horse_id}/ratings"
-    r = requests.get(_url(path.format(horse_id=horse_id)), headers=_headers(), timeout=30)
-    _raise_for_auth(r)
-    r.raise_for_status()
-    return _safe_json(r)
-
-def get_speedmap(horse_id):
-    path = PF_PATH_SPEEDMAP or "/horses/{horse_id}/speedmap"
-    r = requests.get(_url(path.format(horse_id=horse_id)), headers=_headers(), timeout=30)
-    _raise_for_auth(r)
-    r.raise_for_status()
-    return _safe_json(r)
-
-def get_sectionals_csv(meeting_id):
-    path = PF_PATH_SECTIONALS or "/meetings/{meeting_id}/sectionals.csv"
-    r = requests.get(_url(path.format(meeting_id=meeting_id)), headers=_headers(), timeout=30)
-    _raise_for_auth(r)
-    r.raise_for_status()
-    return r.text
-
-def get_benchmarks_csv(meeting_id):
-    path = PF_PATH_BENCHMARKS or "/meetings/{meeting_id}/benchmarks.csv"
-    r = requests.get(_url(path.format(meeting_id=meeting_id)), headers=_headers(), timeout=30)
-    _raise_for_auth(r)
-    r.raise_for_status()
-    return r.text
+        url = _full_url("/Ratings/MeetingBenchmarks")
+        params = {"meetingId": 1, "apiKey": PF_API_KEY}
+        r = requests.get(url, headers=_headers(), params=params, timeout=10)
+        return {"ok": r.ok, "status": r.status_code, "url": url}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
