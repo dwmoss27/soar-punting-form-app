@@ -1,11 +1,12 @@
-# app.py — Soar Bloodstock Data - MoneyBall (Filters + PF Metrics + Optional Embed)
+# app.py — Soar Bloodstock Data - MoneyBall (Filters + PF Metrics + Value Score + Watchlist)
 import io
 import re
 from datetime import date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 # Optional: for logo preview fallback
 try:
@@ -18,6 +19,9 @@ except Exception:
 import streamlit.components.v1 as components
 
 # ------------ Punting Form client (must exist in repo) ------------
+# Your pf_client must read Streamlit secrets for BASE_URL/paths/API key.
+# It should expose: is_live, search_horse_by_name, get_form, get_ratings,
+# get_speedmap, get_sectionals_csv, get_benchmarks_csv
 from pf_client import (
     is_live, search_horse_by_name, get_form,
     get_ratings, get_speedmap, get_sectionals_csv, get_benchmarks_csv
@@ -30,12 +34,15 @@ st.set_page_config(page_title="Soar Bloodstock Data - MoneyBall", layout="wide")
 
 LIVE = is_live()
 
-SALE_BYTES_KEY     = "sale_uploaded_bytes"
-SALE_NAME_KEY      = "sale_uploaded_name"
-LOGO_BYTES_KEY     = "logo_bytes"
-FILTERS_KEY        = "filters"
-PF_METRICS_KEY     = "pf_metrics_cache"   # { horse_name: {"lowest_all_avg_bm": float, ...} }
-SELECTED_HORSE_KEY = "selected_horse"
+SALE_BYTES_KEY      = "sale_uploaded_bytes"
+SALE_NAME_KEY       = "sale_uploaded_name"
+LOGO_BYTES_KEY      = "logo_bytes"
+FILTERS_KEY         = "filters"
+PF_METRICS_KEY      = "pf_metrics_cache"      # { horse_name: {...} }
+SELECTED_HORSE_KEY  = "selected_horse"
+WATCHLIST_KEY       = "watchlist"              # List[str]
+WEIGHTS_KEY         = "value_score_weights"    # dict of weights
+LAST_SELECTED_FROM_TABLE = "last_selected_from_table"
 
 # defaults
 st.session_state.setdefault(FILTERS_KEY, {
@@ -46,15 +53,20 @@ st.session_state.setdefault(FILTERS_KEY, {
     "lowest_bm_max": 5.0,
     "state_selected": []
 })
-st.session_state.setdefault(PF_METRICS_KEY, {})  # name -> dict
+st.session_state.setdefault(PF_METRICS_KEY, {})   # name -> dict
 st.session_state.setdefault(SELECTED_HORSE_KEY, None)
+st.session_state.setdefault(WATCHLIST_KEY, [])
+st.session_state.setdefault(WEIGHTS_KEY, {
+    "w_lowest_bm": 1.0,
+    # (room to add more inputs later: w_recent_l600, w_win_sr, etc.)
+})
 
 # read optional embed config from secrets (only works if PF allows iframes)
-PF_WEB_BASE_URL     = st.secrets.get("PF_WEB_BASE_URL", None)        # e.g. "https://puntingform.com.au"
-PF_HORSE_ROUTE_TMPL = st.secrets.get("PF_HORSE_ROUTE_TEMPLATE", None)  # e.g. "/horses/{horse_id}"
+PF_WEB_BASE_URL     = st.secrets.get("PF_WEB_BASE_URL", None)         # e.g. "https://puntingform.com.au"
+PF_HORSE_ROUTE_TMPL = st.secrets.get("PF_HORSE_ROUTE_TEMPLATE", None) # e.g. "/horses/{horse_id}"
 
 # ──────────────────────────────────────────────────────────────
-# Helpers
+# Helpers: IO / cleaning
 # ──────────────────────────────────────────────────────────────
 def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
     clean = {}
@@ -103,7 +115,6 @@ def normalize_sale_df(df: pd.DataFrame) -> pd.DataFrame:
         }
         return mapping.get(s, s.title())
     out = df.copy()
-    # parsed helper columns if present
     if "Age" in out.columns:
         out["_age_int"] = out["Age"].apply(to_int_age)
     if "Sex" in out.columns:
@@ -134,11 +145,13 @@ def render_logo_center():
                 st.warning("⚠️ Logo could not be displayed and has been cleared. Please re-upload under Settings.")
                 st.session_state.pop(LOGO_BYTES_KEY, None)
 
+# ──────────────────────────────────────────────────────────────
+# PF metrics
+# ──────────────────────────────────────────────────────────────
 def compute_lowest_all_avg_bm_from_df(df: pd.DataFrame) -> Optional[float]:
     """
     Try to find the right column(s) in a PF Benchmarks/Sectionals CSV/DataFrame
     and compute the minimum 'All Avg Benchmark' achieved by the horse.
-    We tolerate multiple naming variants.
     """
     if df is None or df.empty:
         return None
@@ -148,19 +161,15 @@ def compute_lowest_all_avg_bm_from_df(df: pd.DataFrame) -> Optional[float]:
         "all_bmark_var_l", "All_Benchmark_Var_L"
     ]
     for col in df.columns:
-        # exact or fuzzy-insensitive match
         norm = re.sub(r"[^a-z]", "", col.lower())
         for c in candidates:
             if norm == re.sub(r"[^a-z]", "", c.lower()):
                 try:
-                    # "lowest achieved" → the minimum value
-                    # NOTE: In PF, negative means faster than benchmark (good), positive slower.
-                    # You asked for "lowest achieved", so this is simply min.
                     return float(pd.to_numeric(df[col], errors="coerce").min())
                 except Exception:
                     pass
 
-    # If we can't find a canonical column, try to infer from any column containing 'bmark' or 'benchmark'
+    # fallback: any column containing 'bmark' or 'benchmark'
     for col in df.columns:
         if "bmark" in col.lower() or "benchmark" in col.lower():
             try:
@@ -169,9 +178,9 @@ def compute_lowest_all_avg_bm_from_df(df: pd.DataFrame) -> Optional[float]:
                 continue
     return None
 
-def cache_pf_metrics_for_names(names: list[str]) -> None:
+def cache_pf_metrics_for_names(names: List[str]) -> None:
     """
-    For each horse in names, fetch PF ids, then get benchmarks CSV (or sectionals)
+    For each horse in names, fetch PF ids, then get benchmarks (or sectionals)
     and compute 'lowest achieved All Avg Benchmark'. Cache to session.
     """
     if not LIVE:
@@ -200,23 +209,22 @@ def cache_pf_metrics_for_names(names: list[str]) -> None:
 
             horse_id = ident.get("horse_id") or ident.get("id")
 
-            # Prefer Benchmarks CSV if your pf_client returns a CSV string/bytes
+            # Prefer Benchmarks CSV
+            df_b = None
             try:
-                b_csv = get_benchmarks_csv(horse_id)  # may be csv string or bytes
+                b_csv = get_benchmarks_csv(horse_id)  # str | bytes | DataFrame
                 if isinstance(b_csv, (bytes, bytearray)):
                     df_b = pd.read_csv(io.BytesIO(b_csv))
                 elif isinstance(b_csv, str):
                     df_b = pd.read_csv(io.StringIO(b_csv))
                 elif isinstance(b_csv, pd.DataFrame):
                     df_b = b_csv
-                else:
-                    df_b = None
             except Exception:
                 df_b = None
 
             lowest_bm = compute_lowest_all_avg_bm_from_df(df_b)
 
-            # Fallback: try sectionals
+            # Fallback: Sectionals
             if lowest_bm is None:
                 try:
                     s_csv = get_sectionals_csv(horse_id)
@@ -245,12 +253,15 @@ def cache_pf_metrics_for_names(names: list[str]) -> None:
     st.session_state[PF_METRICS_KEY] = pf_cache
     st.success("PF metrics updated.")
 
+# ──────────────────────────────────────────────────────────────
+# Filters / apply
+# ──────────────────────────────────────────────────────────────
 def apply_filters_df(sale_df: pd.DataFrame, name_col: str) -> pd.DataFrame:
     """
     Apply filters using:
       - Age (from _age_int)
       - Sex (_sex_norm)
-      - Maiden (if 'Maiden' column exists as bool or Yes/No)
+      - Maiden (if 'Maiden' col)
       - State (if 'State' col)
       - Lowest achieved All Avg Benchmark (from PF cache)
     """
@@ -270,7 +281,6 @@ def apply_filters_df(sale_df: pd.DataFrame, name_col: str) -> pd.DataFrame:
     # Maiden
     if fs["maiden_choice"] != "Any" and "Maiden" in out.columns:
         want = True if fs["maiden_choice"] == "Yes" else False
-        # allow Yes/No strings or booleans
         def as_bool(v):
             if pd.isna(v): return None
             s = str(v).strip().lower()
@@ -291,16 +301,53 @@ def apply_filters_df(sale_df: pd.DataFrame, name_col: str) -> pd.DataFrame:
             m = cache.get(nm, {})
             lbm = m.get("lowest_all_avg_bm", None)
             if lbm is None:
-                return True  # not fetched → don’t exclude yet
+                return True  # not fetched → don’t exclude
             try:
                 return float(lbm) <= float(fs["lowest_bm_max"])
             except Exception:
                 return True
-
         out = out[out[name_col].apply(pass_bm)]
 
     return out
 
+# ──────────────────────────────────────────────────────────────
+# Value Score
+# ──────────────────────────────────────────────────────────────
+def compute_value_score_for_names(names: List[str]) -> pd.DataFrame:
+    """
+    Build a DataFrame with columns:
+      name, lowest_all_avg_bm, value_score
+    Currently score = -z(lowest_bm) * weight  (more negative BM = better)
+    """
+    cache = st.session_state[PF_METRICS_KEY]
+    rows = []
+    for nm in names:
+        info = cache.get(nm, {})
+        lbm = info.get("lowest_all_avg_bm", None)
+        rows.append({"name": nm, "lowest_all_avg_bm": lbm})
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return df
+
+    # z-normalize where available
+    lbm_series = pd.to_numeric(df["lowest_all_avg_bm"], errors="coerce")
+    mean = lbm_series.mean(skipna=True)
+    std = lbm_series.std(skipna=True)
+    if std and std > 0:
+        z = (lbm_series - mean) / std
+    else:
+        z = pd.Series([0.0]*len(df))
+
+    w = float(st.session_state[WEIGHTS_KEY]["w_lowest_bm"])
+
+    # Lower (more negative) BM is better → negate z
+    df["value_score"] = (-z.fillna(0.0)) * w
+    return df
+
+# ──────────────────────────────────────────────────────────────
+# Embed PF page (optional)
+# ──────────────────────────────────────────────────────────────
 def maybe_embed_pf_page(horse_id: Optional[str]):
     """
     If secrets PF_WEB_BASE_URL + PF_HORSE_ROUTE_TEMPLATE are set AND the site allows iframes,
@@ -320,14 +367,14 @@ def maybe_embed_pf_page(horse_id: Optional[str]):
         st.caption("Add PF_WEB_BASE_URL and PF_HORSE_ROUTE_TEMPLATE in your Streamlit Secrets to enable in-app embedding.")
 
 # ──────────────────────────────────────────────────────────────
-# Title + centered logo
+# UI — Title + logo
 # ──────────────────────────────────────────────────────────────
 render_logo_center()
 st.title("Soar Bloodstock Data - MoneyBall")
 st.sidebar.success("Live Mode (PF API)" if LIVE else "Demo Mode (no API key)")
 
 # Tabs
-tab_app, tab_settings = st.tabs(["App", "Settings"])
+tab_app, tab_settings, tab_watch = st.tabs(["App", "Settings", "Watchlist"])
 
 # =========================
 # SETTINGS TAB
@@ -357,6 +404,33 @@ with tab_settings:
             st.session_state.pop(LOGO_BYTES_KEY, None)
             st.success("Logo cleared.")
             st.rerun()
+
+    st.markdown("---")
+    st.subheader("Value Score Weights")
+    w = st.number_input("Weight: Lowest achieved All Avg Benchmark", value=float(st.session_state[WEIGHTS_KEY]["w_lowest_bm"]), step=0.1)
+    if st.button("Save weights"):
+        st.session_state[WEIGHTS_KEY]["w_lowest_bm"] = float(w)
+        st.success("Weights saved.")
+        st.rerun()
+
+# =========================
+# WATCHLIST TAB
+# =========================
+with tab_watch:
+    st.subheader("⭐ Watchlist")
+    wl = st.session_state[WATCHLIST_KEY]
+
+    if wl:
+        # Show scores if present
+        scores_df = compute_value_score_for_names(wl)
+        if not scores_df.empty:
+            st.dataframe(scores_df.sort_values("value_score", ascending=False), use_container_width=True)
+        else:
+            st.write(pd.DataFrame({"name": wl}))
+        st.download_button("Download watchlist CSV", data=pd.DataFrame({"name": wl}).to_csv(index=False),
+                           file_name="watchlist.csv", mime="text/csv")
+    else:
+        st.info("Your watchlist is empty. Add horses from the App tab.")
 
 # =========================
 # APP TAB
@@ -467,11 +541,24 @@ with tab_app:
     # Apply filters for real
     filtered_df = apply_filters_df(sale_df, name_col)
 
+    # Add Value Score column for filtered list where we have PF cache
+    if not filtered_df.empty:
+        vals = compute_value_score_for_names(filtered_df[name_col].astype(str).tolist())
+        if not vals.empty:
+            filtered_df = filtered_df.merge(vals, left_on=name_col, right_on="name", how="left")
+            filtered_df.drop(columns=["name"], inplace=True, errors="ignore")
+
     st.subheader("Filtered sale horses")
     if not filtered_df.empty:
         # show and let user pick → selecting here updates "Selected horse"
-        st.dataframe(filtered_df, use_container_width=True)
-        # selection control under the table:
+        show_cols = [name_col, "State", "Age", "Sex", "Bid", "Vendor", "Sire", "Dam", "lowest_all_avg_bm", "value_score"]
+        show_cols = [c for c in show_cols if c in filtered_df.columns or c in ["lowest_all_avg_bm", "value_score"]]
+        # ensure columns exist even if null
+        for c in ["lowest_all_avg_bm", "value_score"]:
+            if c not in filtered_df.columns:
+                filtered_df[c] = np.nan
+
+        st.dataframe(filtered_df[show_cols], use_container_width=True)
         sel = st.selectbox("Pick horse from filtered list",
                            ["—"] + sorted(filtered_df[name_col].astype(str).unique()))
         if sel and sel != "—":
@@ -491,10 +578,9 @@ with tab_app:
     selected_name = st.selectbox("Choose a horse", options=["—"] + all_names, index=default_idx)
 
     if selected_name and selected_name != "—":
-        # persist choice
         st.session_state[SELECTED_HORSE_KEY] = selected_name
 
-        # show summary from sale list
+        # Show summary from sale list
         row = sale_df[sale_df[name_col].astype(str) == str(selected_name)]
         if not row.empty:
             r = row.iloc[0].to_dict()
@@ -519,8 +605,8 @@ with tab_app:
         elif LIVE:
             st.caption("No PF metric in cache yet. Click “Refresh PF metrics for all listed horses” above.")
 
-        # Action row: PF view and embed
-        cA, cB = st.columns([1,2])
+        # Action bar: PF view + embed + watchlist
+        cA, cB, cC = st.columns([1,1,2])
         with cA:
             if st.button("🔎 View Punting Form Data"):
                 with st.spinner(f"Fetching Punting Form data for “{selected_name}”…"):
@@ -532,7 +618,6 @@ with tab_app:
                             st.success(f"Found: {ident.get('display_name', selected_name)}")
                             horse_id = ident.get("horse_id") or ident.get("id")
 
-                            # show structured PF JSON data
                             form = get_form(horse_id)
                             ratings = get_ratings(horse_id)
                             speedmap = get_speedmap(horse_id)
@@ -541,12 +626,20 @@ with tab_app:
                             with tabs[1]: st.json(ratings)
                             with tabs[2]: st.json(speedmap)
 
-                            # optional embedded PF page (if allowed)
                             st.markdown("##### Punting Form page (embedded)")
                             maybe_embed_pf_page(horse_id)
                     except Exception as e:
                         st.error(f"Error retrieving PF data: {e}")
         with cB:
+            if selected_name in st.session_state[WATCHLIST_KEY]:
+                if st.button("➖ Remove from Watchlist"):
+                    st.session_state[WATCHLIST_KEY] = [x for x in st.session_state[WATCHLIST_KEY] if x != selected_name]
+                    st.success("Removed from watchlist.")
+            else:
+                if st.button("⭐ Add to Watchlist"):
+                    st.session_state[WATCHLIST_KEY].append(selected_name)
+                    st.success("Added to watchlist.")
+        with cC:
             st.caption("Embed shows only if PF permits iframes. If it’s blank, use the link above the frame.")
 
 # ──────────────────────────────────────────────────────────────
