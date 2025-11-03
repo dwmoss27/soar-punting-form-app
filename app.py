@@ -1,14 +1,17 @@
 # app.py — Soar Bloodstock Data - MoneyBall
 import io
-import os
 import re
 from datetime import date
 from typing import Optional
 
 import streamlit as st
 import pandas as pd
+from PIL import Image  # for validating/decoding uploaded logo images
 
 # ---- Punting Form client (keep pf_client.py in your repo) ----
+# pf_client should read secrets.toml for:
+# PF_BASE_URL, PF_PATH_SEARCH, PF_PATH_FORM, PF_PATH_RATINGS, PF_PATH_SPEEDMAP,
+# PF_PATH_SECTIONALS, PF_PATH_BENCHMARKS, PF_API_KEY
 from pf_client import (
     is_live, search_horse_by_name, get_form,
     get_ratings, get_speedmap, get_sectionals_csv, get_benchmarks_csv
@@ -19,11 +22,11 @@ from pf_client import (
 # ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Soar Bloodstock Data - MoneyBall", layout="wide")
 
-SALE_BYTES_KEY = "sale_uploaded_bytes"
-SALE_NAME_KEY  = "sale_uploaded_name"
-LOGO_BYTES_KEY = "logo_bytes"
-FILTERS_KEY    = "filters"
-HIDE_INPUTS_KEY = "hide_inputs"
+SALE_BYTES_KEY   = "sale_uploaded_bytes"
+SALE_NAME_KEY    = "sale_uploaded_name"
+LOGO_BYTES_KEY   = "logo_bytes"
+FILTERS_KEY      = "filters"
+HIDE_INPUTS_KEY  = "hide_inputs"
 SELECTED_HORSE_KEY = "selected_name"
 
 # Default session values
@@ -109,10 +112,22 @@ def show_kv(label, value):
 # ──────────────────────────────────────────────────────────────
 # Top area: title + (optional) centered logo via Settings tab
 # ──────────────────────────────────────────────────────────────
-col1, col2, col3 = st.columns([1,2,1])
+col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
-    if LOGO_BYTES_KEY in st.session_state and st.session_state[LOGO_BYTES_KEY]:
-        st.image(st.session_state[LOGO_BYTES_KEY], use_container_width=False)
+    # Try to render a valid image only if we truly have image bytes
+    logo_data = st.session_state.get(LOGO_BYTES_KEY, None)
+    if logo_data:
+        try:
+            if isinstance(logo_data, (bytes, bytearray)):
+                img = Image.open(io.BytesIO(logo_data))
+                st.image(img, use_container_width=False)
+            else:
+                # Anything else is invalid — clear it so we don't crash again
+                st.session_state.pop(LOGO_BYTES_KEY, None)
+                st.warning("⚠️ Saved logo was invalid and has been cleared. Please re-upload under Settings.")
+        except Exception:
+            st.session_state.pop(LOGO_BYTES_KEY, None)
+            st.warning("⚠️ Logo could not be displayed and has been cleared. Please re-upload under Settings.")
     st.title("Soar Bloodstock Data - MoneyBall")
 
 # ──────────────────────────────────────────────────────────────
@@ -126,11 +141,29 @@ tab_app, tab_settings = st.tabs(["App", "Settings"])
 with tab_settings:
     st.subheader("Page Settings")
     st.caption("Logo and other persistent settings for this session.")
+
     logo_up = st.file_uploader("Upload a logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
-    if logo_up is not None:
-        if st.button("💾 Save logo"):
-            st.session_state[LOGO_BYTES_KEY] = logo_up.getvalue()
-            st.success("Logo saved for this session. It will appear at the top.")
+
+    cols = st.columns([1,1,2])
+    with cols[0]:
+        if st.button("💾 Save logo", use_container_width=True):
+            if logo_up and hasattr(logo_up, "getvalue"):
+                raw = logo_up.getvalue()
+                # Validate it's an image before saving
+                try:
+                    _ = Image.open(io.BytesIO(raw))  # will raise if not a real image
+                    st.session_state[LOGO_BYTES_KEY] = raw
+                    st.success("Logo saved for this session. It will appear at the top.")
+                    st.rerun()
+                except Exception:
+                    st.error("That file is not a valid image. Please choose a PNG/JPG.")
+            else:
+                st.warning("Please select an image file first.")
+
+    with cols[1]:
+        if st.button("🗑️ Clear saved logo", use_container_width=True):
+            st.session_state.pop(LOGO_BYTES_KEY, None)
+            st.success("Saved logo cleared.")
             st.rerun()
 
 # =========================
@@ -190,7 +223,7 @@ with tab_app:
             st.experimental_rerun()
 
     else:
-        # Data inputs hidden, but still need to construct sale_df from saved/pasted last-known
+        # Data inputs hidden, but still need to construct sale_df from saved
         sale_df = None
         # Prefer saved upload if present
         if (SALE_BYTES_KEY in st.session_state) and (SALE_NAME_KEY in st.session_state):
@@ -218,7 +251,7 @@ with tab_app:
     # ──────────────────────────────────────────────────────────
     st.subheader("Filters")
 
-    ages_all = list(range(1, 11))
+    ages_all = list(range(1, 11))  # 1..10 (plus 'Any' checkbox)
     age_any = st.checkbox("Any age", value=st.session_state[FILTERS_KEY]["age_any"])
     age_selected = st.multiselect("Ages", ages_all, default=st.session_state[FILTERS_KEY]["age_selected"], disabled=age_any)
 
@@ -344,7 +377,7 @@ with tab_app:
     if selected_name and selected_name != "—":
         st.session_state[SELECTED_HORSE_KEY] = selected_name
 
-    # Shortcut: if user wants to pick a horse directly from filtered names:
+    # Shortcut: pick directly from filtered names to sync the selected horse
     st.caption("Tip: picking a name here updates the ‘Selected horse’ above.")
     quick_pick = st.selectbox("Pick from filtered list", options=["—"] + all_names, key="quickpick")
     if quick_pick and quick_pick != "—" and quick_pick != st.session_state.get(SELECTED_HORSE_KEY):
@@ -433,6 +466,12 @@ with st.sidebar.expander("🔧 PF Diagnostics"):
         st.write("BASE_URL:", PF_BASE_URL)
         st.write("PATH_SEARCH:", PF_PATH_SEARCH)
         st.write("API KEY set?:", bool(PF_API_KEY))
+        try:
+            base = PF_BASE_URL.rstrip("/")
+            path = PF_PATH_SEARCH if PF_PATH_SEARCH.startswith("/") else "/" + PF_PATH_SEARCH
+            st.write("Full search URL:", base + path)
+        except Exception:
+            pass
     except Exception:
         st.write("pf_client.py not imported correctly.")
 
