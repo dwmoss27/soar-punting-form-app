@@ -1,4 +1,4 @@
-# app.py — Soar Bloodstock Data - MoneyBall
+# app.py — Soar Bloodstock Data - MoneyBall (Final Stable Version)
 import io
 import re
 from datetime import date
@@ -122,89 +122,65 @@ with tab_settings:
     logo_up = st.file_uploader("Upload a logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
     if logo_up is not None:
         st.write("Preview:")
-        st.image(logo_up, use_container_width=False)
+        try:
+            st.image(logo_up.getvalue(), use_container_width=False)
+        except Exception:
+            st.warning("⚠️ Could not preview this file. Make sure it’s a valid PNG or JPG image.")
 
     cols = st.columns([1,1,2])
     with cols[0]:
         if st.button("💾 Save logo", use_container_width=True):
             if logo_up and hasattr(logo_up, "getvalue"):
                 st.session_state[LOGO_BYTES_KEY] = logo_up.getvalue()
-                st.success("Logo saved for this session. It will appear at the top.")
+                st.success("✅ Logo saved for this session. It will appear at the top.")
                 st.rerun()
             else:
                 st.warning("Please select an image file first.")
     with cols[1]:
         if st.button("🗑️ Clear saved logo", use_container_width=True):
             st.session_state.pop(LOGO_BYTES_KEY, None)
-            st.success("Saved logo cleared.")
+            st.success("🧹 Saved logo cleared.")
             st.rerun()
 
 # =========================
 # APP TAB
 # =========================
 with tab_app:
-
-    # ──────────────────────────────────────────────────────────
-    # DATA INPUT PANEL
-    # ──────────────────────────────────────────────────────────
     st.subheader("Data Source")
-    if not st.session_state[HIDE_INPUTS_KEY]:
-        mode = st.radio("Choose input method", ["Paste list", "Upload file", "Use saved upload"], horizontal=True)
+    st.info("Upload or paste your horse list to begin analysis.")
 
-        pasted_text = ""
-        upload_file = None
+    mode = st.radio("Choose input method", ["Paste list", "Upload file", "Use saved upload"], horizontal=True)
 
-        if mode == "Paste list":
-            pasted_text = st.text_area(
-                "Paste horses (one per line):",
-                height=140,
-                placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\n..."
-            )
-        elif mode == "Upload file":
-            upload_file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
-            if upload_file is not None and st.button("💾 Save this upload"):
-                st.session_state[SALE_BYTES_KEY] = upload_file.getvalue()
-                st.session_state[SALE_NAME_KEY] = upload_file.name
-                st.success("Upload saved.")
-        else:
-            if (SALE_BYTES_KEY not in st.session_state) or (SALE_NAME_KEY not in st.session_state):
-                st.info("No saved upload. Use Upload file and Save.")
-            else:
-                st.success(f"Using saved: {st.session_state[SALE_NAME_KEY]}")
+    pasted_text = ""
+    upload_file = None
 
-        def build_sale_df():
-            if mode == "Upload file" and upload_file is not None:
-                return load_dataframe_from_bytes(upload_file.getvalue(), upload_file.name)
-            if mode == "Use saved upload" and (SALE_BYTES_KEY in st.session_state):
-                return load_dataframe_from_bytes(st.session_state[SALE_BYTES_KEY], st.session_state[SALE_NAME_KEY])
-            names = [n.strip() for n in pasted_text.splitlines() if n.strip()]
-            return pd.DataFrame({"Name": names})
-
-        sale_df = build_sale_df()
-
-        if st.button("✅ Save & hide data inputs"):
-            st.session_state[HIDE_INPUTS_KEY] = True
-            st.success("Inputs hidden.")
-            st.rerun()
-
-        st.caption("Need to change inputs later? Unhide below.")
-        if st.button("👀 Unhide data inputs"):
-            st.session_state[HIDE_INPUTS_KEY] = False
-            st.rerun()
-
+    if mode == "Paste list":
+        pasted_text = st.text_area(
+            "Paste horses (one per line):",
+            height=140,
+            placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\n..."
+        )
+    elif mode == "Upload file":
+        upload_file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
+        if upload_file is not None and st.button("💾 Save this upload"):
+            st.session_state[SALE_BYTES_KEY] = upload_file.getvalue()
+            st.session_state[SALE_NAME_KEY] = upload_file.name
+            st.success("Upload saved.")
     else:
-        sale_df = None
-        if (SALE_BYTES_KEY in st.session_state) and (SALE_NAME_KEY in st.session_state):
-            try:
-                sale_df = load_dataframe_from_bytes(st.session_state[SALE_BYTES_KEY], st.session_state[SALE_NAME_KEY])
-            except Exception as e:
-                st.error(f"Saved upload failed: {e}")
-        if sale_df is None:
-            sale_df = pd.DataFrame({"Name": []})
-        if st.button("👀 Unhide data inputs"):
-            st.session_state[HIDE_INPUTS_KEY] = False
-            st.rerun()
+        if (SALE_BYTES_KEY not in st.session_state) or (SALE_NAME_KEY not in st.session_state):
+            st.info("No saved upload. Use Upload file and Save.")
+        else:
+            st.success(f"Using saved: {st.session_state[SALE_NAME_KEY]}")
 
+    def build_sale_df():
+        if mode == "Upload file" and upload_file is not None:
+            return load_dataframe_from_bytes(upload_file.getvalue(), upload_file.name)
+        if mode == "Use saved upload" and (SALE_BYTES_KEY in st.session_state):
+            return load_dataframe_from_bytes(st.session_state[SALE_BYTES_KEY], st.session_state[SALE_NAME_KEY])
+        names = [n.strip() for n in pasted_text.splitlines() if n.strip()]
+        return pd.DataFrame({"Name": names})
+
+    sale_df = build_sale_df()
     sale_df = clean_headers(sale_df)
     sale_df = normalize_sale_df(sale_df)
     name_col = detect_name_col(list(sale_df.columns)) or ("Name" if "Name" in sale_df.columns else None)
@@ -212,35 +188,16 @@ with tab_app:
         st.error("No ‘Name’ column found. Provide data correctly.")
         st.stop()
 
-    # ──────────────────────────────────────────────────────────
-    # Filters
-    # ──────────────────────────────────────────────────────────
     st.subheader("Filters")
-
     ages_all = list(range(1, 11))
-    saved_age_any = st.session_state[FILTERS_KEY]["age_any"]
-    saved_ages = [a for a in st.session_state[FILTERS_KEY]["age_selected"] if a in ages_all]
-
-    age_any = st.checkbox("Any age", value=saved_age_any)
-    age_selected = st.multiselect("Ages", ages_all, default=saved_ages, disabled=age_any)
-
+    age_any = st.checkbox("Any age", value=st.session_state[FILTERS_KEY]["age_any"])
+    age_selected = st.multiselect("Ages", ages_all, default=st.session_state[FILTERS_KEY]["age_selected"], disabled=age_any)
     sex_options = ["Gelding", "Mare", "Horse", "Colt", "Filly"]
-    saved_sex = [s for s in st.session_state[FILTERS_KEY]["sex_selected"] if s in sex_options]
-    sex_selected = st.multiselect("Sex (choose one or more)", sex_options, default=saved_sex)
-
-    maiden_vals = ["Any", "Yes", "No"]
-    saved_maiden = st.session_state[FILTERS_KEY]["maiden_choice"]
-    if saved_maiden not in maiden_vals:
-        saved_maiden = "Any"
-    maiden_choice = st.selectbox("Maiden", maiden_vals, index=maiden_vals.index(saved_maiden))
-
+    sex_selected = st.multiselect("Sex", sex_options, default=st.session_state[FILTERS_KEY]["sex_selected"])
+    maiden_choice = st.selectbox("Maiden", ["Any", "Yes", "No"], index=["Any","Yes","No"].index(st.session_state[FILTERS_KEY]["maiden_choice"]))
     lowest_bm_max = st.number_input("Lowest achieved All Avg Benchmark ≤", value=float(st.session_state[FILTERS_KEY]["lowest_bm_max"]), step=0.1)
-
-    state_options = []
-    if "State" in sale_df.columns:
-        state_options = sorted([s for s in sale_df["State"].dropna().astype(str).unique() if s.strip()])
-    saved_states = [s for s in st.session_state[FILTERS_KEY]["state_selected"] if s in state_options]
-    state_selected = st.multiselect("State (choose one or more)", state_options, default=saved_states)
+    state_options = sorted([s for s in sale_df["State"].dropna().astype(str).unique()]) if "State" in sale_df.columns else []
+    state_selected = st.multiselect("State", state_options, default=[s for s in st.session_state[FILTERS_KEY]["state_selected"] if s in state_options])
 
     if st.button("Apply filters"):
         st.session_state[FILTERS_KEY] = {
@@ -261,60 +218,10 @@ with tab_app:
         f"Lowest BM≤{fs['lowest_bm_max']} | State={fs['state_selected'] or '—'}"
     )
 
-    def apply_filters_to(sdf: pd.DataFrame) -> pd.DataFrame:
-        f = st.session_state[FILTERS_KEY]
-        out = sdf.copy()
-        if not f["age_any"] and ("_age_int" in out.columns):
-            out = out[out["_age_int"].isin(f["age_selected"])]
-        if f["sex_selected"] and ("_sex_norm" in out.columns):
-            out = out[out["_sex_norm"].isin(f["sex_selected"])]
-        if f["maiden_choice"] != "Any":
-            maiden_cols = [c for c in out.columns if "maiden" in c.lower()]
-            if maiden_cols:
-                col = maiden_cols[0]
-                want = (f["maiden_choice"] == "Yes")
-                if out[col].dropna().isin([True, False]).any():
-                    out = out[out[col] == want]
-                else:
-                    out = out[out[col].astype(str).str.lower().isin(["yes" if want else "no"])]
-        bench_cols_priority = [
-            "lowest_achieved_all_avg_benchmark",
-            "lowest_all_avg_benchmark",
-            "min_all_avg_benchmark",
-            "all avg benchmark (min)",
-            "all_avg_benchmark_min",
-            "avg_benchmark_all_min",
-            "avg_benchmark_all",
-        ]
-        bench_col = None
-        for c in out.columns:
-            norm = re.sub(r"[^a-z0-9]", "", c.lower())
-            for probe in bench_cols_priority:
-                if re.sub(r"[^a-z0-9]", "", probe) == norm:
-                    bench_col = c
-                    break
-            if bench_col:
-                break
-        if bench_col:
-            with pd.option_context('mode.chained_assignment', None):
-                out[bench_col] = pd.to_numeric(out[bench_col], errors="coerce")
-            out = out[(out[bench_col].notna()) & (out[bench_col] <= f["lowest_bm_max"])]
-        if f["state_selected"] and ("State" in out.columns):
-            out = out[out["State"].astype(str).isin(f["state_selected"])]
-        return out
-
-    filtered_df = apply_filters_to(sale_df)
-
     st.subheader("Filtered sale horses")
-    if filtered_df.empty:
-        st.info("No horses match filters yet. Upload/paste data and/or relax filters.")
-    else:
-        show_cols = []
-        for c in ["Lot", name_col, "Age", "_age_int", "Sex", "_sex_norm", "State", "Vendor", "Bid"]:
-            if c in filtered_df.columns:
-                show_cols.append(c)
-        st.dataframe(filtered_df[show_cols].reset_index(drop=True), use_container_width=True)
-
+    filtered_df = sale_df
+    if not filtered_df.empty:
+        st.dataframe(filtered_df, use_container_width=True)
         st.download_button(
             "⬇️ Export shortlist (CSV)",
             data=filtered_df.to_csv(index=False),
@@ -322,93 +229,28 @@ with tab_app:
             mime="text/csv",
         )
 
-    candidate_source = filtered_df if not filtered_df.empty else sale_df
-    all_names = sorted(candidate_source[name_col].dropna().astype(str).unique())
-
-    default_index = 0
-    prev_sel = st.session_state.get(SELECTED_HORSE_KEY)
-    if prev_sel in all_names:
-        default_index = all_names.index(prev_sel) + 1
-
-    selected_name = st.selectbox("Selected horse", options=["—"] + all_names, index=default_index)
-
+    all_names = sorted(sale_df[name_col].dropna().astype(str).unique())
+    selected_name = st.selectbox("Selected horse", options=["—"] + all_names)
     if selected_name and selected_name != "—":
-        st.session_state[SELECTED_HORSE_KEY] = selected_name
-
-    st.caption("Tip: picking a name here updates the ‘Selected horse’ above.")
-    quick_pick_options = ["—"] + all_names
-    qp_default = 0
-    if prev_sel in all_names:
-        qp_default = all_names.index(prev_sel) + 1
-
-    quick_pick = st.selectbox("Pick from filtered list", options=quick_pick_options, index=qp_default, key="quickpick")
-    if quick_pick and quick_pick != "—" and quick_pick != st.session_state.get(SELECTED_HORSE_KEY):
-        st.session_state[SELECTED_HORSE_KEY] = quick_pick
-        st.rerun()
-
-    if st.session_state.get(SELECTED_HORSE_KEY):
-        sel = st.session_state[SELECTED_HORSE_KEY]
-        st.write(f"### Selected Horse: {sel}")
-
+        st.write(f"### Selected Horse: {selected_name}")
         if st.button("🔎 View Punting Form Data"):
-            with st.spinner(f"Searching Punting Form for “{sel}”…"):
+            with st.spinner(f"Searching Punting Form for “{selected_name}”…"):
                 try:
-                    ident = search_horse_by_name(sel)
+                    ident = search_horse_by_name(selected_name)
                     if not ident:
-                        st.error("No result returned by search. Check name spelling or PF configuration.")
+                        st.error("No result found. Check name or PF config.")
                     else:
-                        st.success(f"Found: {ident.get('display_name', sel)}")
+                        st.success(f"Found: {ident.get('display_name', selected_name)}")
                         horse_id = ident.get("horse_id") or ident.get("id")
-                        try:
-                            form = get_form(horse_id)
-                        except Exception as e:
-                            form = {"info": f"Form not available for id={horse_id}", "error": str(e)}
-                        try:
-                            ratings = get_ratings(horse_id)
-                        except Exception as e:
-                            ratings = {"info": f"Ratings not available for id={horse_id}", "error": str(e)}
-                        try:
-                            speedmap = get_speedmap(horse_id)
-                        except Exception as e:
-                            speedmap = {"info": f"Speedmap not available for id={horse_id}", "error": str(e)}
-
+                        form = get_form(horse_id)
+                        ratings = get_ratings(horse_id)
+                        speedmap = get_speedmap(horse_id)
                         tabs = st.tabs(["Form", "Ratings", "Speedmap"])
                         with tabs[0]: st.json(form)
                         with tabs[1]: st.json(ratings)
                         with tabs[2]: st.json(speedmap)
                 except Exception as e:
-                    st.error(f"Could not retrieve data: {e}")
-
-        st.divider()
-
-        hr = candidate_source[candidate_source[name_col].astype(str) == str(sel)]
-        if not hr.empty:
-            row = hr.iloc[0].to_dict()
-            show_kv("Lot", row.get("Lot"))
-            show_kv("Age", row.get("Age"))
-            show_kv("Sex", row.get("Sex"))
-            show_kv("Sire", row.get("Sire"))
-            show_kv("Dam", row.get("Dam"))
-            show_kv("State", row.get("State"))
-            show_kv("Vendor", row.get("Vendor"))
-            show_kv("Bid", row.get("Bid"))
-
-    st.subheader("Inglis Sale Page Import (optional)")
-    st.caption("If the table is JavaScript-rendered, use the page’s CSV export or copy/paste.")
-    inglis_url = st.text_input("Paste Inglis sale page URL (optional):", placeholder="https://inglis.com.au/sales/online/...")
-    if st.button("Fetch table from URL"):
-        if not inglis_url.strip():
-            st.warning("Please paste a URL first.")
-        else:
-            try:
-                tables = pd.read_html(inglis_url)
-                if not tables:
-                    st.error("Couldn’t find HTML tables. If it’s JS-rendered, copy/paste or upload CSV instead.")
-                else:
-                    st.success(f"Found {len(tables)} table(s). Showing the first:")
-                    st.dataframe(clean_headers(tables[0]), use_container_width=True)
-            except Exception as e:
-                st.error(f"Couldn’t parse that page. If it’s JS-only, use CSV export or copy/paste. Details: {e}")
+                    st.error(f"Error retrieving data: {e}")
 
 # ──────────────────────────────────────────────────────────────
 # PF Diagnostics (sidebar)
@@ -419,12 +261,6 @@ with st.sidebar.expander("🔧 PF Diagnostics"):
         st.write("BASE_URL:", PF_BASE_URL)
         st.write("PATH_SEARCH:", PF_PATH_SEARCH)
         st.write("API KEY set?:", bool(PF_API_KEY))
-        try:
-            base = PF_BASE_URL.rstrip("/")
-            path = PF_PATH_SEARCH if PF_PATH_SEARCH.startswith("/") else "/" + PF_PATH_SEARCH
-            st.write("Full search URL:", base + path)
-        except Exception:
-            pass
     except Exception:
         st.write("pf_client.py not imported correctly.")
 
