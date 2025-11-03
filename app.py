@@ -245,14 +245,23 @@ with tab_app:
     # ──────────────────────────────────────────────────────────
     st.subheader("Filters")
 
+    # Intersect saved defaults with current options to avoid StreamlitAPIException
     ages_all = list(range(1, 11))  # 1..10
-    age_any = st.checkbox("Any age", value=st.session_state[FILTERS_KEY]["age_any"])
-    age_selected = st.multiselect("Ages", ages_all, default=st.session_state[FILTERS_KEY]["age_selected"], disabled=age_any)
+    saved_age_any = bool(st.session_state[FILTERS_KEY]["age_any"])
+    saved_ages = [a for a in st.session_state[FILTERS_KEY]["age_selected"] if a in ages_all]
+
+    age_any = st.checkbox("Any age", value=saved_age_any)
+    age_selected = st.multiselect("Ages", ages_all, default=saved_ages, disabled=age_any)
 
     sex_options = ["Gelding", "Mare", "Horse", "Colt", "Filly"]
-    sex_selected = st.multiselect("Sex (choose one or more)", sex_options, default=st.session_state[FILTERS_KEY]["sex_selected"])
+    saved_sex = [s for s in st.session_state[FILTERS_KEY]["sex_selected"] if s in sex_options]
+    sex_selected = st.multiselect("Sex (choose one or more)", sex_options, default=saved_sex)
 
-    maiden_choice = st.selectbox("Maiden", ["Any", "Yes", "No"], index=["Any","Yes","No"].index(st.session_state[FILTERS_KEY]["maiden_choice"]))
+    maiden_vals = ["Any", "Yes", "No"]
+    saved_maiden = st.session_state[FILTERS_KEY]["maiden_choice"]
+    if saved_maiden not in maiden_vals:
+        saved_maiden = "Any"
+    maiden_choice = st.selectbox("Maiden", maiden_vals, index=maiden_vals.index(saved_maiden))
 
     lowest_bm_max = st.number_input("Lowest achieved All Avg Benchmark ≤", value=float(st.session_state[FILTERS_KEY]["lowest_bm_max"]), step=0.1)
 
@@ -260,7 +269,8 @@ with tab_app:
     state_options = []
     if "State" in sale_df.columns:
         state_options = sorted([s for s in sale_df["State"].dropna().astype(str).unique() if s.strip()])
-    state_selected = st.multiselect("State (choose one or more)", state_options, default=st.session_state[FILTERS_KEY]["state_selected"])
+    saved_states = [s for s in st.session_state[FILTERS_KEY]["state_selected"] if s in state_options]
+    state_selected = st.multiselect("State (choose one or more)", state_options, default=saved_states)
 
     if st.button("Apply filters"):
         st.session_state[FILTERS_KEY] = {
@@ -364,8 +374,9 @@ with tab_app:
 
     # Preserve previously selected horse if possible
     default_index = 0
-    if st.session_state.get(SELECTED_HORSE_KEY) in all_names:
-        default_index = all_names.index(st.session_state[SELECTED_HORSE_KEY]) + 1
+    prev_sel = st.session_state.get(SELECTED_HORSE_KEY)
+    if prev_sel in all_names:
+        default_index = all_names.index(prev_sel) + 1  # +1 because of the leading "—"
 
     selected_name = st.selectbox("Selected horse", options=["—"] + all_names, index=default_index)
 
@@ -374,7 +385,11 @@ with tab_app:
 
     # Quick-pick from filtered list (syncs selected)
     st.caption("Tip: picking a name here updates the ‘Selected horse’ above.")
-    quick_pick = st.selectbox("Pick from filtered list", options=["—"] + all_names, key="quickpick")
+    quick_pick_options = ["—"] + all_names
+    qp_default = 0
+    if prev_sel in all_names:
+        qp_default = all_names.index(prev_sel) + 1
+    quick_pick = st.selectbox("Pick from filtered list", options=quick_pick_options, index=qp_default, key="quickpick")
     if quick_pick and quick_pick != "—" and quick_pick != st.session_state.get(SELECTED_HORSE_KEY):
         st.session_state[SELECTED_HORSE_KEY] = quick_pick
         st.rerun()
