@@ -1,120 +1,48 @@
-import os
+# app.py — Soar Bloodstock Data - MoneyBall
 import io
+import os
 import re
-import json
 from datetime import date
+from typing import Optional
 
-import requests
-import pandas as pd
 import streamlit as st
-from bs4 import BeautifulSoup
+import pandas as pd
 
-# Optional fuzzy matching
-try:
-    from rapidfuzz import process, fuzz
-    HAS_RAPIDFUZZ = True
-except Exception:
-    HAS_RAPIDFUZZ = False
-
-# ────────────────────────────────────────────────────────────────────────────────
-# PuntingForm client (must be present as pf_client.py)
-# ────────────────────────────────────────────────────────────────────────────────
+# ---- Punting Form client (keep pf_client.py in your repo) ----
 from pf_client import (
-    is_live,
-    search_horse_by_name,
-    get_form,
-    get_ratings,
-    get_speedmap,
-    get_sectionals_csv,
-    get_benchmarks_csv,
+    is_live, search_horse_by_name, get_form,
+    get_ratings, get_speedmap, get_sectionals_csv, get_benchmarks_csv
 )
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Page + Logo
-# ────────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# Page config & session keys
+# ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Soar Bloodstock Data - MoneyBall", layout="wide")
 
-ASSETS_DIR = "assets"
-os.makedirs(ASSETS_DIR, exist_ok=True)
-LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
+SALE_BYTES_KEY = "sale_uploaded_bytes"
+SALE_NAME_KEY  = "sale_uploaded_name"
+LOGO_BYTES_KEY = "logo_bytes"
+FILTERS_KEY    = "filters"
+HIDE_INPUTS_KEY = "hide_inputs"
+SELECTED_HORSE_KEY = "selected_name"
 
-def save_logo(file):
-    with open(LOGO_PATH, "wb") as f:
-        f.write(file.getbuffer())
-
-def render_logo_top_center():
-    """Shows logo centered at the very top. Works with secrets URL or saved file."""
-    logo_url = None
-    try:
-        # You can set this in Streamlit Secrets if you prefer a hosted logo
-        logo_url = st.secrets.get("LOGO_URL", None)
-    except Exception:
-        pass
-
-    col_l, col_c, col_r = st.columns([1, 2, 1])
-    with col_c:
-        if logo_url:
-            st.markdown(
-                f"<div style='text-align:center;margin-top:6px'><img src='{logo_url}' width='240'></div>",
-                unsafe_allow_html=True,
-            )
-        elif os.path.exists(LOGO_PATH):
-            st.image(LOGO_PATH, width=240)
-
-render_logo_top_center()
-st.title("Soar Bloodstock Data - MoneyBall")
-
+# Default session values
+st.session_state.setdefault(FILTERS_KEY, {
+    "age_any": True,
+    "age_selected": [],
+    "sex_selected": [],
+    "maiden_choice": "Any",
+    "lowest_bm_max": 5.0,
+    "state_selected": []
+})
+st.session_state.setdefault(HIDE_INPUTS_KEY, False)
 LIVE = is_live()
-st.sidebar.success("✅ Live Mode (PF API)" if LIVE else "💤 Demo Mode (no API key)")
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Simple persistence for horse lists (JSON file)
-# ────────────────────────────────────────────────────────────────────────────────
-CACHE_FILE = "saved_horses.json"
-
-def save_to_cache(df):
-    try:
-        df.to_json(CACHE_FILE, orient="records", force_ascii=False)
-    except Exception as e:
-        st.sidebar.warning(f"Could not save cache: {e}")
-
-def load_from_cache():
-    try:
-        if os.path.exists(CACHE_FILE):
-            return pd.read_json(CACHE_FILE)
-    except Exception:
-        return None
-    return None
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Sidebar — inputs & logo upload
-# ────────────────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("🧾 Horse list input")
-    pasted = st.text_area(
-        "Paste horses (one per line):",
-        height=140,
-        placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\nLittle Spark",
-        key="paste_box",
-    )
-    file = st.file_uploader("…or upload CSV/Excel", type=["csv", "xlsx"], key="sale_upload")
-
-    st.markdown("**Or fetch directly from an Inglis sale page**")
-    inglis_url = st.text_input("Inglis Page URL (optional)")
-    fetch_btn = st.button("🌐 Fetch from page", use_container_width=True, key="fetch_inglis")
-
-    st.header("🖼️ Logo Settings")
-    uploaded_logo = st.file_uploader("Upload Logo (PNG/JPG)", type=["png", "jpg", "jpeg"], key="logo_up")
-    if uploaded_logo is not None:
-        st.image(uploaded_logo, width=200)
-        if st.button("💾 Save Logo", use_container_width=True):
-            save_logo(uploaded_logo)
-            st.success("✅ Logo saved — it will appear at the top center.")
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Helpers — header cleaning, name detection, normalisers
-# ────────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────
 def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove BOMs, strip, compress spaces in column headers."""
     clean = {}
     for c in df.columns:
         x = str(c).replace("\ufeff", "")
@@ -122,8 +50,8 @@ def clean_headers(df: pd.DataFrame) -> pd.DataFrame:
         clean[c] = x
     return df.rename(columns=clean)
 
-def detect_name_col(cols) -> str:
-    cols = [str(c) for c in cols]
+def detect_name_col(cols) -> Optional[str]:
+    """Find a column that looks like the horse name column."""
     norm = {re.sub(r"\s+", "", c).lower(): c for c in cols}
     for cand in ["name", "horse", "horse name", "horsename", "lot name"]:
         key = re.sub(r"\s+", "", cand).lower()
@@ -134,584 +62,387 @@ def detect_name_col(cols) -> str:
             return c
     return None
 
-def _looks_like_sale_table(df: pd.DataFrame) -> bool:
-    cols = [str(c).lower() for c in df.columns]
-    must_have_any = ["name", "horse"]
-    return any(any(m in c for m in must_have_any) for c in cols) and len(cols) >= 3
-
-def normalise_sale_fields(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    # Age → numeric (handles "3YO", " 4 yo ", "3yo")
-    if "Age" in out.columns:
-        out["_AgeNum"] = (
-            out["Age"]
-            .astype(str)
-            .str.extract(r"(\d+)")
-            .iloc[:, 0]
-            .astype("float")
-        )
-    # Sex → standard words
-    if "Sex" in out.columns:
-        m = {
-            "G": "Gelding", "GELDING": "Gelding",
-            "M": "Mare", "MARE": "Mare",
-            "H": "Horse", "HORSE": "Horse",
-            "C": "Colt", "COLT": "Colt",
-            "F": "Filly", "FILLY": "Filly",
-            "R": "Rig", "RIG": "Rig",
-        }
-        out["_SexNorm"] = (
-            out["Sex"]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-            .map(m)
-            .fillna(out["Sex"].astype(str).str.strip().str.capitalize())
-        )
-    return out
-
-def apply_sale_filters(sale_df_norm: pd.DataFrame, sel_ages, sel_sex) -> pd.DataFrame:
-    df = sale_df_norm.copy()
-    # Age filter (if not "Any")
-    if "Any" not in sel_ages and "_AgeNum" in df.columns:
-        wanted = [a for a in sel_ages if isinstance(a, int)]
-        if wanted:
-            df = df[df["_AgeNum"].isin(wanted)]
-    # Sex filter (if any selected)
-    if sel_sex and "_SexNorm" in df.columns:
-        df = df[df["_SexNorm"].isin(sel_sex)]
-    return df
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Static Inglis table scraper (fast path)
-# ────────────────────────────────────────────────────────────────────────────────
-def fetch_inglis_table(url: str) -> pd.DataFrame:
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    # 1) Try read_html directly
-    try:
-        tables = pd.read_html(url, flavor="lxml")
-        candidates = [clean_headers(t) for t in tables if _looks_like_sale_table(clean_headers(t))]
-        if candidates:
-            return max(candidates, key=lambda d: len(d))
-    except Exception:
-        pass
-
-    # 2) requests + bs4 + read_html on HTML
-    try:
-        resp = requests.get(url, headers=headers, timeout=20)
-        if resp.status_code != 200:
-            return None
-        html = resp.text
+def load_dataframe_from_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Load CSV or XLSX from bytes with robust parsing."""
+    if filename.lower().endswith(".xlsx"):
         try:
-            tables = pd.read_html(html)
-            candidates = [clean_headers(t) for t in tables if _looks_like_sale_table(clean_headers(t))]
-            if candidates:
-                return max(candidates, key=lambda d: len(d))
-        except Exception:
-            pass
-
-        soup = BeautifulSoup(html, "lxml")
-        table = soup.find("table")
-        if table:
-            df = pd.read_html(str(table))[0]
-            df = clean_headers(df)
-            if _looks_like_sale_table(df):
-                return df
-    except Exception:
-        pass
-
-    return None
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Optional Playwright fallback (dynamic JS pages) — only if installed
-# ────────────────────────────────────────────────────────────────────────────────
-def fetch_inglis_dynamic(url: str) -> pd.DataFrame:
-    """Uses Playwright (headless Chromium) to render JS-only pages. Local/private use."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception:
-        return None
-
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, wait_until="networkidle", timeout=60000)
-            html = page.content()
-            browser.close()
-        tables = pd.read_html(html)
-        if not tables:
-            return None
-        df = max(tables, key=lambda t: len(t))
-        df.columns = [c.strip() for c in df.columns]
-        return df
-    except Exception as e:
-        st.warning(f"Playwright scraper failed: {e}")
-        return None
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Build sale_df (load cache → upload → fetch URL → paste)
-# ────────────────────────────────────────────────────────────────────────────────
-sale_df = None
-file_error = None
-
-# Load cached horses once
-if "horse_cache_loaded" not in st.session_state:
-    cached = load_from_cache()
-    if cached is not None and not cached.empty:
-        sale_df = cached.copy()
-        st.sidebar.success(f"✅ Loaded {len(sale_df)} horses from previous session.")
-    st.session_state["horse_cache_loaded"] = True
-
-# 1) Uploaded file takes priority
-if file is not None:
-    try:
-        if file.name.lower().endswith(".xlsx"):
-            try:
-                tmp = pd.read_excel(file)
-            except Exception as e:
-                raise RuntimeError(f"Excel requires 'openpyxl': {e}")
-        else:
-            try:
-                tmp = pd.read_csv(file, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
-            except UnicodeDecodeError:
-                tmp = pd.read_csv(file, sep=None, engine="python", encoding="ISO-8859-1", on_bad_lines="skip")
-        sale_df = clean_headers(tmp)
-        save_to_cache(sale_df)
-        st.sidebar.success("✅ Uploaded list saved for next session.")
-    except Exception as e:
-        file_error = f"❌ Could not read uploaded file: {e}"
-
-# 2) Fetch from Inglis page
-if fetch_btn and inglis_url:
-    with st.spinner("Fetching Inglis page…"):
-        url_df = fetch_inglis_table(inglis_url)
-        if url_df is None:
-            st.warning("Static scrape failed — trying Playwright (headless browser)…")
-            url_df = fetch_inglis_dynamic(inglis_url)
-        if url_df is None:
-            st.error("Couldn’t parse that page. If it’s JavaScript-only, use the page’s CSV export or copy/paste.")
-        else:
-            url_df = clean_headers(url_df)
-            st.success(f"Fetched {len(url_df)} rows from Inglis page.")
-            if sale_df is None:
-                sale_df = url_df.copy()
-            else:
-                sale_df = pd.concat([sale_df, url_df], ignore_index=True).drop_duplicates()
-            save_to_cache(sale_df)
-
-# 3) Fallback: pasted names
-if sale_df is None:
-    names = [n.strip() for n in pasted.splitlines() if n.strip()]
-    sale_df = pd.DataFrame({"Name": names})
-
-if file_error:
-    st.error(file_error)
-
-# Manual Save button for the current list
-with st.sidebar:
-    if st.button("💾 Save Horses", use_container_width=True):
-        save_to_cache(sale_df)
-        st.success("Saved current horses list to cache.")
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Filters (Age multi, Sex multi, Benchmark threshold)
-# ────────────────────────────────────────────────────────────────────────────────
-name_col = detect_name_col(list(sale_df.columns))
-if not name_col:
-    st.error("No 'Name' column found and no pasted names. Paste names, upload a file, or fetch a page.")
-    st.stop()
-
-with st.sidebar:
-    st.header("🔍 Filters")
-
-    # Age: Any + 1..10 (multi-select)
-    age_options = ["Any"] + list(range(1, 11))
-    sel_ages = st.multiselect(
-        "Age (select one or many)",
-        age_options,
-        default=["Any"],
-        help="Choose 'Any' or one/more exact ages.",
-    )
-
-    # Sex: multi
-    sex_options = ["Gelding", "Mare", "Horse", "Colt", "Filly"]
-    sel_sex = st.multiselect(
-        "Sex (multi-select)",
-        sex_options,
-        default=[],
-        help="Leave empty for any sex, or select one/more.",
-    )
-
-    # Benchmark threshold: max of “lowest achieved”
-    bm_cut = st.number_input(
-        "Max 'Lowest All Avg Benchmark'",
-        value=5.0,
-        step=0.1,
-        help="Filters on each horse’s lowest achieved All Avg Benchmark (best-effort via PuntingForm).",
-    )
-
-# Build a normalised copy of the sale data for filtering & display
-sale_df_norm = normalise_sale_fields(sale_df)
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Selected horse details
-# ────────────────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("🐎 Select a horse")
-    horse_name = st.selectbox(
-        "Horse",
-        sorted(sale_df[name_col].dropna().astype(str).unique())
-    )
-
-st.write(f"### Selected Horse: {horse_name}")
-
-sel_row = sale_df[sale_df[name_col].astype(str) == str(horse_name)]
-if not sel_row.empty:
-    r = sel_row.iloc[0].to_dict()
-
-    def show(label, key):
-        if key in r and pd.notnull(r[key]) and str(r[key]).strip():
-            st.write(f"**{label}:**", r[key])
-
-    for label, key in [
-        ("Lot", "Lot"),
-        ("Age", "Age"),
-        ("Sex", "Sex"),
-        ("Sire", "Sire"),
-        ("Dam", "Dam"),
-        ("Vendor", "Vendor"),
-        ("Bid", "Bid"),
-        ("State", "State"),
-        ("Purchaser", "Purchaser"),
-        ("Time Left", "Time Left"),
-    ]:
-        show(label, key)
-
-# PF button under the selected horse
-st.divider()
-st.subheader("Punting Form — quick view for this selected horse")
-if st.button("🔎 View Punting Form Data (selected horse)"):
-    with st.spinner(f"Fetching Punting Form data for {horse_name}..."):
-        try:
-            ident = search_horse_by_name(horse_name)
-            st.success(f"Found: {ident.get('display_name', horse_name)}")
-            horse_id = ident.get("horse_id")
-
-            form_data = get_form(horse_id)
-            ratings = get_ratings(horse_id)
-            speedmap = get_speedmap(horse_id)
-
-            with st.expander("📄 Form Summary"):
-                st.json(form_data)
-            with st.expander("📊 Ratings"):
-                st.json(ratings)
-            with st.expander("🏃 Speedmap"):
-                st.json(speedmap)
+            return clean_headers(pd.read_excel(io.BytesIO(file_bytes)))
         except Exception as e:
-            st.error(f"Could not retrieve data: {e}")
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Full list from sale file (filtered by Age/Sex) + export
-# ────────────────────────────────────────────────────────────────────────────────
-sale_filtered = apply_sale_filters(sale_df_norm, sel_ages, sel_sex)
-with st.expander(f"📋 Filtered sale horses (from upload/page) — {len(sale_filtered)} found", expanded=True):
-    show_cols = []
-    for c in ["Lot", name_col, "Age", "_AgeNum", "Sex", "_SexNorm", "Sire", "Dam", "Vendor", "State", "Bid", "Time Left"]:
-        if c in sale_filtered.columns:
-            show_cols.append(c)
-    if not show_cols:
-        show_cols = list(sale_filtered.columns)[:10]
-
-    nice = sale_filtered[show_cols].rename(columns={
-        name_col: "Name",
-        "_AgeNum": "Age (num)",
-        "_SexNorm": "Sex (norm)"
-    })
-
-    st.dataframe(nice.reset_index(drop=True), use_container_width=True)
-    st.download_button(
-        "Download filtered sale list (CSV)",
-        data=nice.to_csv(index=False),
-        file_name="sale_filtered.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Demo DB support (optional) for shortlist builder matching
-# ────────────────────────────────────────────────────────────────────────────────
-@st.cache_data
-def load_demo_db():
+            raise RuntimeError("Excel reading requires 'openpyxl'. Add it to requirements.txt.") from e
+    # CSV: try smart separator & encodings
+    bio = io.BytesIO(file_bytes)
     try:
-        df = pd.read_csv("data/puntingform_demo.csv")
-        df["name_std"] = (
-            df["horse_name"].str.upper()
-            .str.replace(r"[^A-Z0-9 ]", "", regex=True)
-            .str.replace(r"\s+", " ", regex=True)
-            .str.strip()
-        )
-        return df
-    except Exception:
-        return None
+        df = pd.read_csv(bio, sep=None, engine="python", encoding="utf-8", on_bad_lines="skip")
+        return clean_headers(df)
+    except UnicodeDecodeError:
+        bio.seek(0)
+        df = pd.read_csv(bio, sep=None, engine="python", encoding="ISO-8859-1", on_bad_lines="skip")
+        return clean_headers(df)
 
-DEMO = None if LIVE else load_demo_db()
-
-def std_name(x: str) -> str:
-    return (x or "").upper().strip()
-
-def demo_fuzzy_lookup(name: str):
-    if DEMO is None:
-        return None, 0
-    target = std_name(name)
-    choices = DEMO["name_std"].tolist()
-    if HAS_RAPIDFUZZ:
-        best = process.extractOne(target, choices, scorer=fuzz.WRatio, score_cutoff=70)
-        if not best:
-            return None, 0
-        row = DEMO[DEMO["name_std"] == best[0]].iloc[0].to_dict()
-        return row, int(best[1])
-    else:
-        m = DEMO[DEMO["name_std"].str.startswith(target)]
-        if m.empty:
-            m = DEMO[DEMO["name_std"] == target]
-        if m.empty:
-            return None, 0
-        return m.iloc[0].to_dict(), 100
-
-# ────────────────────────────────────────────────────────────────────────────────
-# PF Enrichment: Lowest All Avg Benchmark per horse (best-effort)
-# ────────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def compute_lowest_benchmarks(names):
-    """
-    Returns DataFrame(display_name, lowest_all_avg_benchmark).
-    LIVE: attempts PF endpoints (best-effort; depends on plan/endpoints).
-    DEMO: falls back to demo CSV avg_benchmark_all.
-    """
-    rows = []
-    for n in names:
-        if not n:
-            continue
-        out_row = {"display_name": n, "lowest_all_avg_benchmark": None}
-
-        if LIVE:
-            try:
-                ident = search_horse_by_name(n)
-                horse_id = ident.get("horse_id")
-                form_payload = get_form(horse_id)
-
-                meetings = []
-                if isinstance(form_payload, dict):
-                    for k in ("meetings", "data", "runs", "recentRuns", "items"):
-                        if k in form_payload and isinstance(form_payload[k], list):
-                            for it in form_payload[k]:
-                                for mk in ("meeting_id", "meetingId", "MeetingId", "meeting"):
-                                    if mk in it:
-                                        val = it[mk]
-                                        mid = val if isinstance(val, (int, str)) else (val.get("id") if isinstance(val, dict) else None)
-                                        if mid:
-                                            meetings.append(str(mid))
-
-                meetings = list(dict.fromkeys(meetings))
-                vals = []
-                for mid in meetings[:10]:  # cap for safety
-                    try:
-                        csvtext = get_benchmarks_csv(mid)
-                        try:
-                            bmdf = pd.read_csv(io.StringIO(csvtext))
-                        except Exception:
-                            bmdf = pd.read_csv(io.StringIO(csvtext), sep=None, engine="python")
-                        name_cand = detect_name_col(list(bmdf.columns)) or "Horse"
-                        mask = bmdf[name_cand].astype(str).str.strip().str.upper() == n.strip().upper()
-                        sub = bmdf[mask]
-                        col_candidates = [c for c in bmdf.columns if "all" in str(c).lower() and "bench" in str(c).lower()]
-                        if not sub.empty and col_candidates:
-                            for c in col_candidates:
-                                vals.extend(pd.to_numeric(sub[c], errors="coerce").dropna().tolist())
-                    except Exception:
-                        pass
-
-                if vals:
-                    out_row["lowest_all_avg_benchmark"] = min(vals)
-
-            except Exception:
-                pass
-
-        if not LIVE and DEMO is not None and out_row["lowest_all_avg_benchmark"] is None:
-            d, _ = demo_fuzzy_lookup(n)
-            if d and "avg_benchmark_all" in d and pd.notnull(d["avg_benchmark_all"]):
-                out_row["lowest_all_avg_benchmark"] = float(d["avg_benchmark_all"])
-
-        rows.append(out_row)
-
-    if not rows:
-        return pd.DataFrame(columns=["display_name", "lowest_all_avg_benchmark"])
-    return pd.DataFrame(rows)
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Shortlist builder + PF enrichment + filters + save shortlist
-# ────────────────────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.subheader("Shortlist Builder")
-
-names_text = st.text_area(
-    "Horse list (optional — paste another list here for filtering):",
-    height=160,
-    placeholder="Eleanor Nancy\nFast Intentions\nSir Goldalot\nLittle Spark",
-    key="shortlist_box",
-)
-names = [n.strip() for n in names_text.splitlines() if n.strip()]
-unique_names = sorted(set(names)) if names else []
-
-colA, colB = st.columns([1, 1])
-with colA:
-    enrich_clicked = st.button("⚙️ Enrich via PF (compute 'Lowest All Avg Benchmark')", use_container_width=True)
-with colB:
-    save_clicked = st.button("💾 Save current filtered list", use_container_width=True)
-
-@st.cache_data(show_spinner=False)
-def build_filter_table(base_df: pd.DataFrame, pasted_names: list[str]) -> pd.DataFrame:
-    # Start from pasted names if present, else from sale_df’s name column
-    if pasted_names:
-        df = pd.DataFrame({"display_name": pasted_names})
-    else:
-        name_c = detect_name_col(list(base_df.columns))
-        base_list = base_df[name_c].dropna().astype(str).unique().tolist() if name_c else []
-        df = pd.DataFrame({"display_name": base_list})
-
-    # Try to bring across Age/Sex from sale_df if present
-    base_norm = base_df.copy()
-    name_c = detect_name_col(list(base_norm.columns))
-    if name_c:
-        base_norm["__key"] = base_norm[name_c].astype(str).str.upper().str.strip()
-    else:
-        base_norm["__key"] = ""
-    df["__key"] = df["display_name"].astype(str).str.upper().str.strip()
-
-    for col_src, col_out in [("Age", "_age_src"), ("Sex", "_sex_src")]:
-        if col_src in base_norm.columns:
-            df = df.merge(base_norm[["__key", col_src]].rename(columns={col_src: col_out}), on="__key", how="left")
-    return df.drop(columns=["__key"])
-
-working = build_filter_table(sale_df, unique_names)
-
-# Enrich (best effort)
-if enrich_clicked and not working.empty:
-    with st.spinner("Querying Punting Form for lowest 'All Avg Benchmark'…"):
-        bench_df = compute_lowest_benchmarks(working["display_name"].tolist())
-        if not bench_df.empty:
-            working = working.merge(bench_df, on="display_name", how="left")
-        else:
-            st.warning("No benchmark data could be computed. Check PF credentials/endpoints or try again.")
-else:
-    # Try to reuse cached enrichment silently
-    try:
-        bench_df = compute_lowest_benchmarks(working["display_name"].tolist())
-        working = working.merge(bench_df, on="display_name", how="left")
-    except Exception:
-        pass
-
-# Apply shortlist filters
-def apply_shortlist_filters(df_in: pd.DataFrame) -> pd.DataFrame:
-    if df_in is None or df_in.empty:
-        return df_in
-    out = df_in.copy()
-
-    # Age filter (only if not "Any") — use uploaded Age column if present
-    if "Any" not in sel_ages:
-        if "_age_src" in out.columns:
-            try:
-                out["_age_num"] = pd.to_numeric(
-                    out["_age_src"].astype(str).str.extract(r"(\d+)").iloc[:, 0],
-                    errors="coerce"
-                )
-                wanted = [a for a in sel_ages if isinstance(a, int)]
-                out = out[out["_age_num"].isin(wanted)]
-            except Exception:
-                pass
-
-    # Sex filtering
-    if sel_sex:
-        if "_sex_src" in out.columns:
-            out["_sex_norm"] = out["_sex_src"].astype(str).str.strip().str.capitalize()
-            out = out[out["_sex_norm"].isin(sel_sex)]
-
-    # Benchmark filtering
-    if "lowest_all_avg_benchmark" in out.columns and out["lowest_all_avg_benchmark"].notnull().any():
-        out = out[pd.to_numeric(out["lowest_all_avg_benchmark"], errors="coerce") <= bm_cut]
-
+def normalize_sale_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Add convenience normalized columns (_age_int, _sex_norm)."""
+    def to_int_age(val):
+        if pd.isna(val): return None
+        m = re.search(r"(\d+)", str(val))
+        return int(m.group(1)) if m else None
+    def normalize_sex(val):
+        if pd.isna(val): return None
+        s = str(val).strip().upper()
+        mapping = {
+            "G": "Gelding", "M": "Mare", "H": "Horse",
+            "C": "Colt", "F": "Filly",
+            "GELDING":"Gelding", "MARE":"Mare", "HORSE":"Horse",
+            "COLT":"Colt", "FILLY":"Filly"
+        }
+        return mapping.get(s, s.title())
+    out = df.copy()
+    if "Age" in out.columns:
+        out["_age_int"] = out["Age"].apply(to_int_age)
+    if "Sex" in out.columns:
+        out["_sex_norm"] = out["Sex"].apply(normalize_sex)
     return out
 
-filtered = apply_shortlist_filters(working)
+def show_kv(label, value):
+    if value is not None and str(value).strip():
+        st.write(f"**{label}:**", value)
 
-# UI: filtered table + selection + saved shortlist
-left, right = st.columns([1, 1])
+# ──────────────────────────────────────────────────────────────
+# Top area: title + (optional) centered logo via Settings tab
+# ──────────────────────────────────────────────────────────────
+col1, col2, col3 = st.columns([1,2,1])
+with col2:
+    if LOGO_BYTES_KEY in st.session_state and st.session_state[LOGO_BYTES_KEY]:
+        st.image(st.session_state[LOGO_BYTES_KEY], use_container_width=False)
+    st.title("Soar Bloodstock Data - MoneyBall")
 
-with left:
-    st.subheader("Filtered horses (shortlist view)")
-    if filtered is None or filtered.empty:
-        st.info("No horses match filters yet. Paste names, Enrich via PF, and/or relax filters.")
-        choice = None
-    else:
-        show_cols = ["display_name", "_age_src", "_sex_src", "lowest_all_avg_benchmark"]
-        show_cols = [c for c in show_cols if c in filtered.columns]
-        st.dataframe(
-            filtered[show_cols]
-            .rename(columns={
-                "display_name": "Horse",
-                "_age_src": "Age",
-                "_sex_src": "Sex",
-                "lowest_all_avg_benchmark": "Lowest All Avg Benchmark",
-            })
-            .reset_index(drop=True),
-            use_container_width=True,
-        )
+# ──────────────────────────────────────────────────────────────
+# App Tabs: App  |  Settings
+# ──────────────────────────────────────────────────────────────
+tab_app, tab_settings = st.tabs(["App", "Settings"])
 
-        choice = st.selectbox(
-            "Select a horse for full Punting Form data",
-            filtered["display_name"].tolist(),
-            key="detail_select",
-        )
+# =========================
+# SETTINGS TAB (logo etc.)
+# =========================
+with tab_settings:
+    st.subheader("Page Settings")
+    st.caption("Logo and other persistent settings for this session.")
+    logo_up = st.file_uploader("Upload a logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
+    if logo_up is not None:
+        if st.button("💾 Save logo"):
+            st.session_state[LOGO_BYTES_KEY] = logo_up.getvalue()
+            st.success("Logo saved for this session. It will appear at the top.")
+            st.rerun()
 
-        if save_clicked and not filtered.empty:
-            st.session_state["saved_shortlist"] = filtered["display_name"].tolist()
-            st.success(f"Saved {len(st.session_state['saved_shortlist'])} horses.")
+# =========================
+# APP TAB
+# =========================
+with tab_app:
 
-        if "saved_shortlist" in st.session_state and st.session_state["saved_shortlist"]:
-            st.markdown("#### 📌 Saved shortlist")
-            st.write(", ".join(st.session_state["saved_shortlist"]))
-            st.download_button(
-                "Download saved shortlist (CSV)",
-                data=pd.DataFrame({"Horse": st.session_state["saved_shortlist"]}).to_csv(index=False),
-                file_name="saved_shortlist.csv",
-                mime="text/csv",
+    # ──────────────────────────────────────────────────────────
+    # DATA INPUT PANEL (can be hidden once saved)
+    # ──────────────────────────────────────────────────────────
+    st.subheader("Data Source")
+    if not st.session_state[HIDE_INPUTS_KEY]:
+        mode = st.radio("Choose input method", ["Paste list", "Upload file", "Use saved upload"], horizontal=True)
+
+        pasted_text = ""
+        upload_file = None
+
+        if mode == "Paste list":
+            pasted_text = st.text_area(
+                "Paste horses (one per line):",
+                height=140,
+                placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\n..."
             )
+        elif mode == "Upload file":
+            upload_file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
+            if upload_file is not None and st.button("💾 Save this upload"):
+                st.session_state[SALE_BYTES_KEY] = upload_file.getvalue()
+                st.session_state[SALE_NAME_KEY] = upload_file.name
+                st.success("Upload saved for this session.")
+        else:  # Use saved upload
+            if (SALE_BYTES_KEY not in st.session_state) or (SALE_NAME_KEY not in st.session_state):
+                st.info("No saved upload yet. Switch to 'Upload file' and save it.")
+            else:
+                st.success(f"Using saved: {st.session_state[SALE_NAME_KEY]}")
 
-with right:
-    st.subheader("Punting Form data (from shortlist)")
-    if filtered is None or filtered.empty or not choice:
-        st.caption("Paste some names, click 'Enrich via PF', apply filters, then pick a horse.")
+        # Build sale_df from chosen source
+        def build_sale_df_from_mode():
+            if mode == "Upload file" and upload_file is not None:
+                return load_dataframe_from_bytes(upload_file.getvalue(), upload_file.name)
+            if mode == "Use saved upload" and (SALE_BYTES_KEY in st.session_state):
+                return load_dataframe_from_bytes(st.session_state[SALE_BYTES_KEY], st.session_state[SALE_NAME_KEY])
+            # Paste fallback
+            names = [n.strip() for n in pasted_text.splitlines() if n.strip()]
+            return pd.DataFrame({"Name": names})
+
+        sale_df = build_sale_df_from_mode()
+
+        # Hide inputs toggle
+        if st.button("✅ Save & hide data inputs"):
+            st.session_state[HIDE_INPUTS_KEY] = True
+            st.success("Inputs hidden. Use the Settings tab for logo; unhide inputs with the button below.")
+            st.rerun()
+
+        st.caption("Need to switch inputs later? Unhide below.")
+        if st.button("👀 Unhide data inputs"):
+            st.session_state[HIDE_INPUTS_KEY] = False
+            st.experimental_rerun()
+
     else:
-        if st.button("🔍 View Punting Form Data (shortlist selection)"):
-            with st.spinner(f"Fetching Punting Form data for {choice}..."):
+        # Data inputs hidden, but still need to construct sale_df from saved/pasted last-known
+        sale_df = None
+        # Prefer saved upload if present
+        if (SALE_BYTES_KEY in st.session_state) and (SALE_NAME_KEY in st.session_state):
+            try:
+                sale_df = load_dataframe_from_bytes(st.session_state[SALE_BYTES_KEY], st.session_state[SALE_NAME_KEY])
+            except Exception as e:
+                st.error(f"Saved upload failed to load: {e}")
+        if sale_df is None:
+            # fallback empty frame
+            sale_df = pd.DataFrame({"Name": []})
+        if st.button("👀 Unhide data inputs"):
+            st.session_state[HIDE_INPUTS_KEY] = False
+            st.experimental_rerun()
+
+    # Normalize + detect name column
+    sale_df = clean_headers(sale_df)
+    sale_df = normalize_sale_df(sale_df)
+    name_col = detect_name_col(list(sale_df.columns)) or ("Name" if "Name" in sale_df.columns else None)
+    if not name_col:
+        st.error("No 'Name' or similar column found. Provide a pasted list or upload a file that contains horse names.")
+        st.stop()
+
+    # ──────────────────────────────────────────────────────────
+    # Filters (multi-select + Apply button + State)
+    # ──────────────────────────────────────────────────────────
+    st.subheader("Filters")
+
+    ages_all = list(range(1, 11))
+    age_any = st.checkbox("Any age", value=st.session_state[FILTERS_KEY]["age_any"])
+    age_selected = st.multiselect("Ages", ages_all, default=st.session_state[FILTERS_KEY]["age_selected"], disabled=age_any)
+
+    sex_options = ["Gelding", "Mare", "Horse", "Colt", "Filly"]
+    sex_selected = st.multiselect("Sex (choose one or more)", sex_options, default=st.session_state[FILTERS_KEY]["sex_selected"])
+
+    maiden_choice = st.selectbox("Maiden", ["Any", "Yes", "No"], index=["Any","Yes","No"].index(st.session_state[FILTERS_KEY]["maiden_choice"]))
+
+    lowest_bm_max = st.number_input("Lowest achieved All Avg Benchmark ≤", value=float(st.session_state[FILTERS_KEY]["lowest_bm_max"]), step=0.1)
+
+    # State filter (multi)
+    state_options = []
+    if "State" in sale_df.columns:
+        state_options = sorted([s for s in sale_df["State"].dropna().astype(str).unique() if s.strip()])
+    state_selected = st.multiselect("State (choose one or more)", state_options, default=st.session_state[FILTERS_KEY]["state_selected"])
+
+    if st.button("Apply filters"):
+        st.session_state[FILTERS_KEY] = {
+            "age_any": age_any,
+            "age_selected": age_selected,
+            "sex_selected": sex_selected,
+            "maiden_choice": maiden_choice,
+            "lowest_bm_max": lowest_bm_max,
+            "state_selected": state_selected,
+        }
+        st.success("Filters applied.")
+        st.experimental_rerun()
+
+    # Filter summary
+    fs = st.session_state[FILTERS_KEY]
+    st.caption(
+        f"Applied: Age={'Any' if fs['age_any'] else fs['age_selected'] or '—'} | "
+        f"Sex={fs['sex_selected'] or '—'} | Maiden={fs['maiden_choice']} | "
+        f"Lowest All Avg BM≤{fs['lowest_bm_max']} | State={fs['state_selected'] or '—'}"
+    )
+
+    # Apply filters
+    def apply_filters_to(sdf: pd.DataFrame) -> pd.DataFrame:
+        f = st.session_state[FILTERS_KEY]
+        out = sdf.copy()
+
+        # Age
+        if not f["age_any"] and ("_age_int" in out.columns):
+            out = out[out["_age_int"].isin(f["age_selected"])]
+
+        # Sex
+        if f["sex_selected"] and ("_sex_norm" in out.columns):
+            out = out[out["_sex_norm"].isin(f["sex_selected"])]
+
+        # Maiden (best-effort if present)
+        if f["maiden_choice"] != "Any":
+            maiden_cols = [c for c in out.columns if "maiden" in c.lower()]
+            if maiden_cols:
+                col = maiden_cols[0]
+                want = (f["maiden_choice"] == "Yes")
+                if out[col].dropna().isin([True, False]).any():
+                    out = out[out[col] == want]
+                else:
+                    out = out[out[col].astype(str).str.lower().isin(["yes" if want else "no"])]
+
+        # Lowest achieved All Avg Benchmark (try to find a column)
+        bench_cols_priority = [
+            "lowest_achieved_all_avg_benchmark",
+            "lowest_all_avg_benchmark",
+            "min_all_avg_benchmark",
+            "all avg benchmark (min)",
+            "all_avg_benchmark_min",
+            "avg_benchmark_all_min",
+            "avg_benchmark_all",  # fallback
+        ]
+        bench_col = None
+        for c in out.columns:
+            norm = re.sub(r"[^a-z0-9]", "", c.lower())
+            for probe in bench_cols_priority:
+                if re.sub(r"[^a-z0-9]", "", probe) == norm:
+                    bench_col = c
+                    break
+            if bench_col:
+                break
+        if bench_col:
+            with pd.option_context('mode.chained_assignment', None):
+                out[bench_col] = pd.to_numeric(out[bench_col], errors="coerce")
+            out = out[(out[bench_col].notna()) & (out[bench_col] <= f["lowest_bm_max"])]
+
+        # State
+        if f["state_selected"] and ("State" in out.columns):
+            out = out[out["State"].astype(str).isin(f["state_selected"])]
+
+        return out
+
+    filtered_df = apply_filters_to(sale_df)
+
+    # ──────────────────────────────────────────────────────────
+    # Filtered list + shortlist download + selection control
+    # ──────────────────────────────────────────────────────────
+    st.subheader("Filtered sale horses")
+    if filtered_df.empty:
+        st.info("No horses match filters yet. Upload/paste data and/or relax filters.")
+    else:
+        show_cols = []
+        for c in ["Lot", name_col, "Age", "_age_int", "Sex", "_sex_norm", "State", "Vendor", "Bid"]:
+            if c in filtered_df.columns:
+                show_cols.append(c)
+        st.dataframe(filtered_df[show_cols].reset_index(drop=True), use_container_width=True)
+
+        st.download_button(
+            "⬇️ Export shortlist (CSV)",
+            data=filtered_df.to_csv(index=False),
+            file_name="shortlist.csv",
+            mime="text/csv",
+        )
+
+    # Select horse (require from filtered list if available)
+    candidate_source = filtered_df if not filtered_df.empty else sale_df
+    all_names = sorted(candidate_source[name_col].dropna().astype(str).unique())
+    # Keep previously selected if still present
+    default_index = 0
+    if st.session_state.get(SELECTED_HORSE_KEY) in all_names:
+        default_index = all_names.index(st.session_state[SELECTED_HORSE_KEY]) + 1
+    selected_name = st.selectbox("Selected horse", options=["—"] + all_names, index=default_index)
+
+    # update selected in session when user picks from dropdown
+    if selected_name and selected_name != "—":
+        st.session_state[SELECTED_HORSE_KEY] = selected_name
+
+    # Shortcut: if user wants to pick a horse directly from filtered names:
+    st.caption("Tip: picking a name here updates the ‘Selected horse’ above.")
+    quick_pick = st.selectbox("Pick from filtered list", options=["—"] + all_names, key="quickpick")
+    if quick_pick and quick_pick != "—" and quick_pick != st.session_state.get(SELECTED_HORSE_KEY):
+        st.session_state[SELECTED_HORSE_KEY] = quick_pick
+        st.experimental_rerun()
+
+    # ──────────────────────────────────────────────────────────
+    # Selected horse details + PF data button (above divider)
+    # ──────────────────────────────────────────────────────────
+    if st.session_state.get(SELECTED_HORSE_KEY):
+        sel = st.session_state[SELECTED_HORSE_KEY]
+        st.write(f"### Selected Horse: {sel}")
+
+        # View PF data button (here, above divider)
+        if st.button("🔎 View Punting Form Data"):
+            with st.spinner(f"Searching Punting Form for “{sel}”…"):
                 try:
-                    ident = search_horse_by_name(choice)
-                    st.success(f"Found: {ident.get('display_name', choice)}")
+                    ident = search_horse_by_name(sel)
+                    if not ident:
+                        st.error("No result returned by search. Check name spelling or PF configuration.")
+                    else:
+                        st.success(f"Found: {ident.get('display_name', sel)}")
+                        horse_id = ident.get("horse_id") or ident.get("id")
+                        # Try per-horse endpoints (your PF plan may need meeting/race ids)
+                        try:
+                            form = get_form(horse_id)
+                        except Exception as e:
+                            form = {"info": f"Form not available for id={horse_id}", "error": str(e)}
+                        try:
+                            ratings = get_ratings(horse_id)
+                        except Exception as e:
+                            ratings = {"info": f"Ratings not available for id={horse_id}", "error": str(e)}
+                        try:
+                            speedmap = get_speedmap(horse_id)
+                        except Exception as e:
+                            speedmap = {"info": f"Speedmap not available for id={horse_id}", "error": str(e)}
 
-                    horse_id = ident.get("horse_id")
-
-                    form_data = get_form(horse_id)
-                    ratings = get_ratings(horse_id)
-                    speedmap = get_speedmap(horse_id)
-
-                    with st.expander("📄 Form Summary"):
-                        st.json(form_data)
-                    with st.expander("📊 Ratings"):
-                        st.json(ratings)
-                    with st.expander("🏃 Speedmap"):
-                        st.json(speedmap)
+                        tabs = st.tabs(["Form", "Ratings", "Speedmap"])
+                        with tabs[0]: st.json(form)
+                        with tabs[1]: st.json(ratings)
+                        with tabs[2]: st.json(speedmap)
                 except Exception as e:
                     st.error(f"Could not retrieve data: {e}")
 
-st.caption("Tip: For dynamic Inglis pages, install Playwright locally and the app will fall back automatically.")
+        st.divider()
+
+        # show sale fields for selected horse
+        hr = candidate_source[candidate_source[name_col].astype(str) == str(sel)]
+        if not hr.empty:
+            row = hr.iloc[0].to_dict()
+            show_kv("Lot", row.get("Lot"))
+            show_kv("Age", row.get("Age"))
+            show_kv("Sex", row.get("Sex"))
+            show_kv("Sire", row.get("Sire"))
+            show_kv("Dam", row.get("Dam"))
+            show_kv("State", row.get("State"))
+            show_kv("Vendor", row.get("Vendor"))
+            show_kv("Bid", row.get("Bid"))
+
+    # ──────────────────────────────────────────────────────────
+    # Inglis Page Import (optional)
+    # ──────────────────────────────────────────────────────────
+    st.subheader("Inglis Sale Page Import (optional)")
+    st.caption("If the table is JavaScript-rendered, use the page’s CSV export or copy/paste.")
+    inglis_url = st.text_input("Paste Inglis sale page URL (optional):", placeholder="https://inglis.com.au/sales/online/...")
+    if st.button("Fetch table from URL"):
+        if not inglis_url.strip():
+            st.warning("Please paste a URL first.")
+        else:
+            try:
+                tables = pd.read_html(inglis_url)
+                if not tables:
+                    st.error("Couldn’t find HTML tables. If it’s JS-rendered, copy/paste or upload CSV instead.")
+                else:
+                    st.success(f"Found {len(tables)} table(s). Showing the first:")
+                    st.dataframe(clean_headers(tables[0]), use_container_width=True)
+            except Exception as e:
+                st.error(f"Couldn’t parse that page. If it’s JS-only, use CSV export or copy/paste. Details: {e}")
+
+# ──────────────────────────────────────────────────────────────
+# PF Diagnostics (sidebar)
+# ──────────────────────────────────────────────────────────────
+with st.sidebar.expander("🔧 PF Diagnostics"):
+    try:
+        from pf_client import PF_BASE_URL, PF_PATH_SEARCH, PF_API_KEY
+        st.write("BASE_URL:", PF_BASE_URL)
+        st.write("PATH_SEARCH:", PF_PATH_SEARCH)
+        st.write("API KEY set?:", bool(PF_API_KEY))
+    except Exception:
+        st.write("pf_client.py not imported correctly.")
+
+    test_name = st.text_input("Quick PF search:", "Little Spark")
+    if st.button("Run search"):
+        try:
+            res = search_horse_by_name(test_name)
+            st.success(res if res else "No result")
+        except Exception as e:
+            st.error(str(e))
+
+# Sidebar live/demo indicator at bottom
+st.sidebar.success("Live Mode (PF API)" if LIVE else "Demo Mode (no API key)")
