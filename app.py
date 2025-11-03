@@ -1,20 +1,23 @@
-# app.py — Soar Bloodstock Data - MoneyBall (Robust Logo Fix)
+# app.py — Soar Bloodstock Data - MoneyBall (Filters + PF Metrics + Optional Embed)
 import io
 import re
 from datetime import date
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import streamlit as st
 import pandas as pd
 
-# Optional PIL import for safer image rendering (we fall back only if needed)
+# Optional: for logo preview fallback
 try:
-    from PIL import Image  # pillow must be in requirements
+    from PIL import Image
     PIL_AVAILABLE = True
 except Exception:
     PIL_AVAILABLE = False
 
-# ---- Punting Form client (pf_client.py must be in repo) ----
+# Optional embed support
+import streamlit.components.v1 as components
+
+# ------------ Punting Form client (must exist in repo) ------------
 from pf_client import (
     is_live, search_horse_by_name, get_form,
     get_ratings, get_speedmap, get_sectionals_csv, get_benchmarks_csv
@@ -25,12 +28,16 @@ from pf_client import (
 # ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Soar Bloodstock Data - MoneyBall", layout="wide")
 
+LIVE = is_live()
+
 SALE_BYTES_KEY     = "sale_uploaded_bytes"
 SALE_NAME_KEY      = "sale_uploaded_name"
 LOGO_BYTES_KEY     = "logo_bytes"
 FILTERS_KEY        = "filters"
+PF_METRICS_KEY     = "pf_metrics_cache"   # { horse_name: {"lowest_all_avg_bm": float, ...} }
+SELECTED_HORSE_KEY = "selected_horse"
 
-# Defaults
+# defaults
 st.session_state.setdefault(FILTERS_KEY, {
     "age_any": True,
     "age_selected": [],
@@ -39,8 +46,12 @@ st.session_state.setdefault(FILTERS_KEY, {
     "lowest_bm_max": 5.0,
     "state_selected": []
 })
+st.session_state.setdefault(PF_METRICS_KEY, {})  # name -> dict
+st.session_state.setdefault(SELECTED_HORSE_KEY, None)
 
-LIVE = is_live()
+# read optional embed config from secrets (only works if PF allows iframes)
+PF_WEB_BASE_URL     = st.secrets.get("PF_WEB_BASE_URL", None)        # e.g. "https://puntingform.com.au"
+PF_HORSE_ROUTE_TMPL = st.secrets.get("PF_HORSE_ROUTE_TEMPLATE", None)  # e.g. "/horses/{horse_id}"
 
 # ──────────────────────────────────────────────────────────────
 # Helpers
@@ -92,6 +103,7 @@ def normalize_sale_df(df: pd.DataFrame) -> pd.DataFrame:
         }
         return mapping.get(s, s.title())
     out = df.copy()
+    # parsed helper columns if present
     if "Age" in out.columns:
         out["_age_int"] = out["Age"].apply(to_int_age)
     if "Sex" in out.columns:
@@ -103,17 +115,14 @@ def show_kv(label, value):
         st.write(f"**{label}:**", value)
 
 def render_logo_center():
-    """Render saved logo safely in the center column. Clears bad data if crashes."""
     logo_data = st.session_state.get(LOGO_BYTES_KEY, None)
     if not logo_data:
         return
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
+    c1, c2, c3 = st.columns([1,2,1])
+    with c2:
         try:
-            # Prefer BytesIO wrapper for Streamlit Cloud robustness
             st.image(io.BytesIO(logo_data), use_container_width=False)
         except Exception:
-            # Try PIL as a fallback if available
             if PIL_AVAILABLE:
                 try:
                     img = Image.open(io.BytesIO(logo_data))
@@ -125,15 +134,199 @@ def render_logo_center():
                 st.warning("⚠️ Logo could not be displayed and has been cleared. Please re-upload under Settings.")
                 st.session_state.pop(LOGO_BYTES_KEY, None)
 
+def compute_lowest_all_avg_bm_from_df(df: pd.DataFrame) -> Optional[float]:
+    """
+    Try to find the right column(s) in a PF Benchmarks/Sectionals CSV/DataFrame
+    and compute the minimum 'All Avg Benchmark' achieved by the horse.
+    We tolerate multiple naming variants.
+    """
+    if df is None or df.empty:
+        return None
+
+    candidates = [
+        "All Avg Benchmark", "All Bmark Var L", "all_avg_benchmark",
+        "all_bmark_var_l", "All_Benchmark_Var_L"
+    ]
+    for col in df.columns:
+        # exact or fuzzy-insensitive match
+        norm = re.sub(r"[^a-z]", "", col.lower())
+        for c in candidates:
+            if norm == re.sub(r"[^a-z]", "", c.lower()):
+                try:
+                    # "lowest achieved" → the minimum value
+                    # NOTE: In PF, negative means faster than benchmark (good), positive slower.
+                    # You asked for "lowest achieved", so this is simply min.
+                    return float(pd.to_numeric(df[col], errors="coerce").min())
+                except Exception:
+                    pass
+
+    # If we can't find a canonical column, try to infer from any column containing 'bmark' or 'benchmark'
+    for col in df.columns:
+        if "bmark" in col.lower() or "benchmark" in col.lower():
+            try:
+                return float(pd.to_numeric(df[col], errors="coerce").min())
+            except Exception:
+                continue
+    return None
+
+def cache_pf_metrics_for_names(names: list[str]) -> None:
+    """
+    For each horse in names, fetch PF ids, then get benchmarks CSV (or sectionals)
+    and compute 'lowest achieved All Avg Benchmark'. Cache to session.
+    """
+    if not LIVE:
+        st.info("Demo mode: PF metrics won’t be fetched (no API key).")
+        return
+
+    pf_cache: Dict[str, Any] = st.session_state[PF_METRICS_KEY]
+    prog = st.progress(0.0)
+    total = len(names) if names else 0
+
+    for i, nm in enumerate(names, start=1):
+        nm_key = str(nm).strip()
+        if not nm_key:
+            prog.progress(min(i/total, 1.0) if total else 1.0)
+            continue
+        if nm_key in pf_cache and pf_cache[nm_key].get("lowest_all_avg_bm") is not None:
+            prog.progress(min(i/total, 1.0) if total else 1.0)
+            continue
+
+        try:
+            ident = search_horse_by_name(nm_key)
+            if not ident:
+                pf_cache[nm_key] = {"error": "not_found"}
+                prog.progress(min(i/total, 1.0) if total else 1.0)
+                continue
+
+            horse_id = ident.get("horse_id") or ident.get("id")
+
+            # Prefer Benchmarks CSV if your pf_client returns a CSV string/bytes
+            try:
+                b_csv = get_benchmarks_csv(horse_id)  # may be csv string or bytes
+                if isinstance(b_csv, (bytes, bytearray)):
+                    df_b = pd.read_csv(io.BytesIO(b_csv))
+                elif isinstance(b_csv, str):
+                    df_b = pd.read_csv(io.StringIO(b_csv))
+                elif isinstance(b_csv, pd.DataFrame):
+                    df_b = b_csv
+                else:
+                    df_b = None
+            except Exception:
+                df_b = None
+
+            lowest_bm = compute_lowest_all_avg_bm_from_df(df_b)
+
+            # Fallback: try sectionals
+            if lowest_bm is None:
+                try:
+                    s_csv = get_sectionals_csv(horse_id)
+                    if isinstance(s_csv, (bytes, bytearray)):
+                        df_s = pd.read_csv(io.BytesIO(s_csv))
+                    elif isinstance(s_csv, str):
+                        df_s = pd.read_csv(io.StringIO(s_csv))
+                    elif isinstance(s_csv, pd.DataFrame):
+                        df_s = s_csv
+                    else:
+                        df_s = None
+                    lowest_bm = compute_lowest_all_avg_bm_from_df(df_s)
+                except Exception:
+                    pass
+
+            pf_cache[nm_key] = {
+                "horse_id": horse_id,
+                "display_name": ident.get("display_name", nm_key),
+                "lowest_all_avg_bm": lowest_bm
+            }
+        except Exception as e:
+            pf_cache[nm_key] = {"error": str(e)}
+
+        prog.progress(min(i/total, 1.0) if total else 1.0)
+
+    st.session_state[PF_METRICS_KEY] = pf_cache
+    st.success("PF metrics updated.")
+
+def apply_filters_df(sale_df: pd.DataFrame, name_col: str) -> pd.DataFrame:
+    """
+    Apply filters using:
+      - Age (from _age_int)
+      - Sex (_sex_norm)
+      - Maiden (if 'Maiden' column exists as bool or Yes/No)
+      - State (if 'State' col)
+      - Lowest achieved All Avg Benchmark (from PF cache)
+    """
+    out = sale_df.copy()
+    fs = st.session_state[FILTERS_KEY]
+
+    # Age
+    if not fs["age_any"] and fs["age_selected"]:
+        if "_age_int" in out.columns:
+            out = out[out["_age_int"].isin(fs["age_selected"])]
+
+    # Sex
+    if fs["sex_selected"]:
+        if "_sex_norm" in out.columns:
+            out = out[out["_sex_norm"].isin(fs["sex_selected"])]
+
+    # Maiden
+    if fs["maiden_choice"] != "Any" and "Maiden" in out.columns:
+        want = True if fs["maiden_choice"] == "Yes" else False
+        # allow Yes/No strings or booleans
+        def as_bool(v):
+            if pd.isna(v): return None
+            s = str(v).strip().lower()
+            if s in ["true", "yes", "y", "1"]: return True
+            if s in ["false", "no", "n", "0"]: return False
+            return None
+        out = out[out["Maiden"].apply(as_bool) == want]
+
+    # State
+    if fs["state_selected"] and "State" in out.columns:
+        out = out[out["State"].astype(str).isin(fs["state_selected"])]
+
+    # Lowest achieved All Avg Benchmark (PF cache)
+    if fs["lowest_bm_max"] is not None:
+        cache = st.session_state[PF_METRICS_KEY]
+        def pass_bm(name_val):
+            nm = str(name_val).strip()
+            m = cache.get(nm, {})
+            lbm = m.get("lowest_all_avg_bm", None)
+            if lbm is None:
+                return True  # not fetched → don’t exclude yet
+            try:
+                return float(lbm) <= float(fs["lowest_bm_max"])
+            except Exception:
+                return True
+
+        out = out[out[name_col].apply(pass_bm)]
+
+    return out
+
+def maybe_embed_pf_page(horse_id: Optional[str]):
+    """
+    If secrets PF_WEB_BASE_URL + PF_HORSE_ROUTE_TEMPLATE are set AND the site allows iframes,
+    embed the page. Otherwise show a link.
+    """
+    if not horse_id:
+        return
+
+    if PF_WEB_BASE_URL and PF_HORSE_ROUTE_TMPL:
+        url = PF_WEB_BASE_URL.rstrip("/") + PF_HORSE_ROUTE_TMPL.format(horse_id=str(horse_id))
+        st.markdown(f"[Open on Punting Form]({url})")
+        try:
+            components.iframe(src=url, height=900, scrolling=True)
+        except Exception:
+            st.info("This site may block embedding. Use the link above.")
+    else:
+        st.caption("Add PF_WEB_BASE_URL and PF_HORSE_ROUTE_TEMPLATE in your Streamlit Secrets to enable in-app embedding.")
+
 # ──────────────────────────────────────────────────────────────
-# Title + (optional) centered logo (from Settings tab)
+# Title + centered logo
 # ──────────────────────────────────────────────────────────────
 render_logo_center()
 st.title("Soar Bloodstock Data - MoneyBall")
+st.sidebar.success("Live Mode (PF API)" if LIVE else "Demo Mode (no API key)")
 
-# ──────────────────────────────────────────────────────────────
-# Tabs: App  |  Settings
-# ──────────────────────────────────────────────────────────────
+# Tabs
 tab_app, tab_settings = st.tabs(["App", "Settings"])
 
 # =========================
@@ -141,7 +334,6 @@ tab_app, tab_settings = st.tabs(["App", "Settings"])
 # =========================
 with tab_settings:
     st.subheader("Page Settings")
-    st.caption("Logo and persistent settings for this session.")
 
     logo_up = st.file_uploader("Upload a logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
     if logo_up is not None:
@@ -149,21 +341,21 @@ with tab_settings:
         try:
             st.image(logo_up.getvalue(), use_container_width=False)
         except Exception:
-            st.warning("⚠️ Could not preview this file. Make sure it’s a valid PNG or JPG image.")
+            st.warning("Could not preview this file.")
 
-    cols = st.columns([1,1,2])
-    with cols[0]:
-        if st.button("💾 Save logo", use_container_width=True):
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("💾 Save logo"):
             if logo_up and hasattr(logo_up, "getvalue"):
                 st.session_state[LOGO_BYTES_KEY] = logo_up.getvalue()
-                st.success("✅ Logo saved for this session. It will appear at the top.")
+                st.success("Logo saved. It will show at the top.")
                 st.rerun()
             else:
-                st.warning("Please select an image file first.")
-    with cols[1]:
-        if st.button("🗑️ Clear saved logo", use_container_width=True):
+                st.warning("Please select a file first.")
+    with c2:
+        if st.button("🗑️ Clear logo"):
             st.session_state.pop(LOGO_BYTES_KEY, None)
-            st.success("🧹 Saved logo cleared.")
+            st.success("Logo cleared.")
             st.rerun()
 
 # =========================
@@ -171,31 +363,28 @@ with tab_settings:
 # =========================
 with tab_app:
     st.subheader("Data Source")
-    st.info("Upload or paste your horse list to begin analysis.")
+    st.info("Upload or paste your sale list, then compute PF metrics and filter.")
 
-    mode = st.radio("Choose input method", ["Paste list", "Upload file", "Use saved upload"], horizontal=True)
-
+    mode = st.radio("Choose input", ["Paste list", "Upload file", "Use saved upload"], horizontal=True)
     pasted_text = ""
     upload_file = None
 
     if mode == "Paste list":
-        pasted_text = st.text_area(
-            "Paste horses (one per line):",
-            height=140,
-            placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\n..."
-        )
+        pasted_text = st.text_area("Horses (one per line)", height=140,
+                                   placeholder="Hell Island\nInvincible Phantom\nIrish Bliss\n...")
     elif mode == "Upload file":
         upload_file = st.file_uploader("Upload CSV or Excel", type=["csv","xlsx"])
         if upload_file is not None and st.button("💾 Save this upload"):
             st.session_state[SALE_BYTES_KEY] = upload_file.getvalue()
             st.session_state[SALE_NAME_KEY] = upload_file.name
-            st.success("Upload saved.")
+            st.success("Upload saved for reuse.")
     else:
-        if (SALE_BYTES_KEY not in st.session_state) or (SALE_NAME_KEY not in st.session_state):
-            st.info("No saved upload. Use Upload file and Save.")
+        if SALE_BYTES_KEY in st.session_state and SALE_NAME_KEY in st.session_state:
+            st.success(f"Using saved file: {st.session_state[SALE_NAME_KEY]}")
         else:
-            st.success(f"Using saved: {st.session_state[SALE_NAME_KEY]}")
+            st.info("No saved upload available.")
 
+    # Build sale_df
     def build_sale_df():
         if mode == "Upload file" and upload_file is not None:
             return load_dataframe_from_bytes(upload_file.getvalue(), upload_file.name)
@@ -207,23 +396,44 @@ with tab_app:
     sale_df = build_sale_df()
     sale_df = clean_headers(sale_df)
     sale_df = normalize_sale_df(sale_df)
+
     name_col = detect_name_col(list(sale_df.columns)) or ("Name" if "Name" in sale_df.columns else None)
     if not name_col:
-        st.error("No ‘Name’ column found. Provide data correctly.")
+        st.error("No ‘Name’ column found. Paste a name list or upload a CSV/Excel that has a Name column.")
         st.stop()
 
-    # ── Filters
+    # Controls for PF metrics
+    st.markdown("#### Punting Form Metrics")
+    colm = st.columns([1,1,2])
+    with colm[0]:
+        if st.button("🔄 Refresh PF metrics for all listed horses"):
+            all_names = sorted(sale_df[name_col].dropna().astype(str).unique())
+            if not all_names:
+                st.warning("No names to fetch.")
+            else:
+                cache_pf_metrics_for_names(all_names)
+                st.rerun()
+    with colm[1]:
+        if st.button("🧹 Clear PF metrics cache"):
+            st.session_state[PF_METRICS_KEY] = {}
+            st.success("PF metrics cache cleared.")
+            st.rerun()
+    with colm[2]:
+        st.caption("This fills the cache with 'lowest achieved All Avg Benchmark'. Filtering will use it when available.")
+
+    # Filters
     st.subheader("Filters")
-    ages_all = list(range(1, 11))
     fs_prev = st.session_state[FILTERS_KEY]
+    ages_all = list(range(1, 11))
 
     age_any = st.checkbox("Any age", value=fs_prev["age_any"])
-    age_default = [a for a in fs_prev["age_selected"] if a in ages_all]
-    age_selected = st.multiselect("Ages", ages_all, default=age_default, disabled=age_any)
+    age_selected = st.multiselect("Ages (choose one or more)", ages_all,
+                                  default=[a for a in fs_prev["age_selected"] if a in ages_all],
+                                  disabled=age_any)
 
     sex_options = ["Gelding", "Mare", "Horse", "Colt", "Filly"]
-    sex_default = [s for s in fs_prev["sex_selected"] if s in sex_options]
-    sex_selected = st.multiselect("Sex", sex_options, default=sex_default)
+    sex_selected = st.multiselect("Sex (multi-select)", sex_options,
+                                  default=[s for s in fs_prev["sex_selected"] if s in sex_options])
 
     maiden_choice = st.selectbox("Maiden", ["Any", "Yes", "No"],
                                  index=["Any","Yes","No"].index(fs_prev["maiden_choice"]))
@@ -232,8 +442,8 @@ with tab_app:
                                     value=float(fs_prev["lowest_bm_max"]), step=0.1)
 
     state_options = sorted([s for s in sale_df["State"].dropna().astype(str).unique()]) if "State" in sale_df.columns else []
-    state_default = [s for s in fs_prev["state_selected"] if s in state_options]
-    state_selected = st.multiselect("State (choose one or more)", state_options, default=state_default)
+    state_selected = st.multiselect("State (multi-select)", state_options,
+                                    default=[s for s in fs_prev["state_selected"] if s in state_options])
 
     if st.button("Apply filters"):
         st.session_state[FILTERS_KEY] = {
@@ -249,56 +459,95 @@ with tab_app:
 
     fs = st.session_state[FILTERS_KEY]
     st.caption(
-        f"Applied: Age={'Any' if fs['age_any'] else fs['age_selected'] or '—'} | "
+        f"Applied → Age={'Any' if fs['age_any'] else (fs['age_selected'] or '—')} | "
         f"Sex={fs['sex_selected'] or '—'} | Maiden={fs['maiden_choice']} | "
         f"Lowest BM≤{fs['lowest_bm_max']} | State={fs['state_selected'] or '—'}"
     )
 
-    # (You can implement filter logic here when you have BM data joined)
-    filtered_df = sale_df
+    # Apply filters for real
+    filtered_df = apply_filters_df(sale_df, name_col)
 
     st.subheader("Filtered sale horses")
     if not filtered_df.empty:
-        # clicking a row won't select, but we let the user pick below
+        # show and let user pick → selecting here updates "Selected horse"
         st.dataframe(filtered_df, use_container_width=True)
-        st.download_button(
-            "⬇️ Export shortlist (CSV)",
-            data=filtered_df.to_csv(index=False),
-            file_name="shortlist.csv",
-            mime="text/csv",
-        )
+        # selection control under the table:
+        sel = st.selectbox("Pick horse from filtered list",
+                           ["—"] + sorted(filtered_df[name_col].astype(str).unique()))
+        if sel and sel != "—":
+            st.session_state[SELECTED_HORSE_KEY] = sel
+            st.success(f"Selected: {sel}")
     else:
-        st.info("No horses to display yet. Paste or upload first.")
+        st.info("No horses match filters yet. Refresh PF metrics and/or relax filters.")
 
-    all_names = sorted(sale_df[name_col].dropna().astype(str).unique())
     st.markdown("---")
     st.subheader("Selected horse")
 
-    selected_name = st.selectbox("Pick a horse", options=["—"] + all_names)
+    # prefer the last selected via picker; else keep manual selection
+    all_names = sorted(sale_df[name_col].dropna().astype(str).unique())
+    default_idx = 0
+    if st.session_state[SELECTED_HORSE_KEY] in all_names:
+        default_idx = 1 + all_names.index(st.session_state[SELECTED_HORSE_KEY])
+    selected_name = st.selectbox("Choose a horse", options=["—"] + all_names, index=default_idx)
+
     if selected_name and selected_name != "—":
-        st.write(f"### {selected_name}")
+        # persist choice
+        st.session_state[SELECTED_HORSE_KEY] = selected_name
 
-        # Make the PF button visible right under the selected horse header
-        if st.button("🔎 View Punting Form Data"):
-            with st.spinner(f"Searching Punting Form for “{selected_name}”…"):
-                try:
-                    ident = search_horse_by_name(selected_name)
-                    if not ident:
-                        st.error("No result found. Check name or PF config.")
-                    else:
-                        st.success(f"Found: {ident.get('display_name', selected_name)}")
-                        horse_id = ident.get("horse_id") or ident.get("id")
-                        # If your PF API expects meeting/race ids, adapt these calls accordingly
-                        form = get_form(horse_id)
-                        ratings = get_ratings(horse_id)
-                        speedmap = get_speedmap(horse_id)
+        # show summary from sale list
+        row = sale_df[sale_df[name_col].astype(str) == str(selected_name)]
+        if not row.empty:
+            r = row.iloc[0].to_dict()
+            st.write(f"### {selected_name}")
+            cols_top = st.columns(3)
+            with cols_top[0]:
+                show_kv("Lot", r.get("Lot"))
+                show_kv("Age", r.get("Age"))
+                show_kv("Sex", r.get("Sex"))
+            with cols_top[1]:
+                show_kv("Sire", r.get("Sire"))
+                show_kv("Dam", r.get("Dam"))
+                show_kv("State", r.get("State"))
+            with cols_top[2]:
+                show_kv("Vendor", r.get("Vendor"))
+                show_kv("Bid", r.get("Bid"))
 
-                        tabs = st.tabs(["Form", "Ratings", "Speedmap"])
-                        with tabs[0]: st.json(form)
-                        with tabs[1]: st.json(ratings)
-                        with tabs[2]: st.json(speedmap)
-                except Exception as e:
-                    st.error(f"Error retrieving data: {e}")
+        # PF quick metric under the summary (if fetched)
+        m = st.session_state[PF_METRICS_KEY].get(selected_name, {})
+        if m.get("lowest_all_avg_bm") is not None:
+            st.info(f"Lowest achieved All Avg Benchmark: **{m['lowest_all_avg_bm']}**")
+        elif LIVE:
+            st.caption("No PF metric in cache yet. Click “Refresh PF metrics for all listed horses” above.")
+
+        # Action row: PF view and embed
+        cA, cB = st.columns([1,2])
+        with cA:
+            if st.button("🔎 View Punting Form Data"):
+                with st.spinner(f"Fetching Punting Form data for “{selected_name}”…"):
+                    try:
+                        ident = search_horse_by_name(selected_name)
+                        if not ident:
+                            st.error("No PF result. Check the name or your PF config.")
+                        else:
+                            st.success(f"Found: {ident.get('display_name', selected_name)}")
+                            horse_id = ident.get("horse_id") or ident.get("id")
+
+                            # show structured PF JSON data
+                            form = get_form(horse_id)
+                            ratings = get_ratings(horse_id)
+                            speedmap = get_speedmap(horse_id)
+                            tabs = st.tabs(["Form", "Ratings", "Speedmap"])
+                            with tabs[0]: st.json(form)
+                            with tabs[1]: st.json(ratings)
+                            with tabs[2]: st.json(speedmap)
+
+                            # optional embedded PF page (if allowed)
+                            st.markdown("##### Punting Form page (embedded)")
+                            maybe_embed_pf_page(horse_id)
+                    except Exception as e:
+                        st.error(f"Error retrieving PF data: {e}")
+        with cB:
+            st.caption("Embed shows only if PF permits iframes. If it’s blank, use the link above the frame.")
 
 # ──────────────────────────────────────────────────────────────
 # PF Diagnostics (sidebar)
@@ -310,7 +559,7 @@ with st.sidebar.expander("🔧 PF Diagnostics"):
         st.write("PATH_SEARCH:", PF_PATH_SEARCH)
         st.write("API KEY set?:", bool(PF_API_KEY))
     except Exception:
-        st.write("pf_client.py not imported correctly.")
+        st.write("pf_client not fully configured.")
 
     test_name = st.text_input("Quick PF search:", "Little Spark")
     if st.button("Run search"):
